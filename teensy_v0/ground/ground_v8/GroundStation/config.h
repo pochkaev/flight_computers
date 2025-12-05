@@ -13,6 +13,24 @@
 #define SD_CS_PIN          4
 #define BUTTON_PIN         5   // Page change button (active LOW)
 
+// Launch controller / RS-485 power module (Master)
+// Uses MAX3485 / MAX485 transceiver.
+#define PWR_RS485_DE_RE_PIN 6      // DE+RE control
+#define PWR_RS485_SERIAL    Serial2
+#define PWR_RS485_BAUD      9600
+
+// ARM / START switches and LEDs (active-LOW inputs)
+#define PWR_ARM_A_PIN       20
+#define PWR_ARM_B_PIN       21
+#define PWR_START_A_PIN     22
+#define PWR_START_B_PIN     23
+// Use pins within D1-D23 range for LEDs
+#define PWR_LED_A_PIN       16
+#define PWR_LED_B_PIN       17
+
+// Local battery measurement (3.7V Li-ion via 100k/100k divider)
+#define PWR_VBAT_PIN        A0
+
 // LoRa
 #define LORA_FREQUENCY     915E6
 #define LORA_SPI_FREQ      8000000
@@ -29,6 +47,9 @@
 #define SMALL_FONT         u8g2_font_6x10_tr
 #define UI_MANUAL_TIMEOUT_MS 30000    // After manual page change, return after 30s
 #define UI_RESET_HOLD_MS     3000     // Hold button to reset link/phase
+// RS-485 turnaround timings (us)
+#define PWR_DE_PRE_US        20
+#define PWR_DE_POST_US       1200
 // Many 0.96" 128x64 I2C modules are SH1106 (column offset) even when sold as SSD1306.
 // Set to 1 for SH1106 driver, 0 to force SSD1306 driver.
 #define OLED_IS_SH1106     1

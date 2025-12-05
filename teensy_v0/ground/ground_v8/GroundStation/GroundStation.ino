@@ -5,6 +5,7 @@
 #include "sensors.h"
 #include "sdlog.h"
 #include "ui.h"
+#include "power.h"
 
 static uint32_t lastPadLogMs = 0;
 static uint32_t lastLostLogMs = 0;
@@ -62,6 +63,7 @@ void setup() {
     sensors_init();
     radio_init();
     sdlog_init();
+    power_init();
     ui_init();
 
     DBG1("GroundStation READY");
@@ -70,6 +72,7 @@ void setup() {
 void loop() {
     sensors_update();
     radio_update();
+    power_update();
 
     if (!sdlog_hasGpsTime && gps.date.isValid() && gps.time.isValid()) {
         DBG1("GPS TIME ACQUIRED → timestamp logs");

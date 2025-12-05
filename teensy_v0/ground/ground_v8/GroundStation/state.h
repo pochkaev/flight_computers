@@ -16,6 +16,7 @@ enum PageIndex : uint8_t {
     PAGE_FLIGHT,
     PAGE_RECOVERY,
     PAGE_LOST,
+    PAGE_LAUNCH,
     PAGE_ROCKET_DIAG,
     PAGE_DIAG,
     PAGE_SIGNAL,

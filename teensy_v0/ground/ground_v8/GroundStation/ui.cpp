@@ -3,6 +3,7 @@
 #include "radio.h"
 #include "sensors.h"
 #include "sdlog.h"
+#include "power.h"
 
 #if OLED_IS_SH1106
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
@@ -22,6 +23,7 @@ static void drawRocketStatus();
 static void drawFlight();
 static void drawRecovery();
 static void drawLost();
+static void drawLaunch();
 static void drawRocketDiag();
 static void drawDiag();
 static void drawSignal();
@@ -129,6 +131,7 @@ void ui_update() {
         case PAGE_FLIGHT:         drawFlight();         break;
         case PAGE_RECOVERY:       drawRecovery();       break;
         case PAGE_LOST:           drawLost();           break;
+        case PAGE_LAUNCH:         drawLaunch();         break;
         case PAGE_ROCKET_DIAG:    drawRocketDiag();     break;
         case PAGE_DIAG:           drawDiag();           break;
         case PAGE_SIGNAL:         drawSignal();         break;
@@ -229,6 +232,44 @@ static void drawLost() {
     snprintf(b, sizeof(b), "Age: %.1fs",
              (millis()-rocketLastPacketMs)/1000.0f);
     u8g2.drawStr(0, 60, b);
+}
+
+static void drawLaunch() {
+    u8g2.setFont(SMALL_FONT);
+    u8g2.drawStr(0, 10, "[LAUNCH]");
+
+    char b[40];
+
+    // Top: ignition battery from power module + local ground batt
+    snprintf(b, sizeof(b), "Ign:%.1fV Bat:%.1fV",
+             pwr_vbat_x10 / 10.0f,
+             pwr_localVbat);
+    u8g2.drawStr(0, 22, b);
+
+    // Link / fault marker on the right
+    char marker = '!';
+    if (power_link_fresh()) {
+        marker = pwr_faultAny ? 'F' : '*';
+    }
+    char m[2] = {marker, '\0'};
+    u8g2.drawStr(114, 22, m);
+
+    // Lane A
+    snprintf(b, sizeof(b), "A:%s %s I:%.1f(%s)",
+             pwr_key_ok ? (pwr_armA_seen ? "ARM" : "SAFE") : "LOCK",
+             pwr_onA ? "[ON]" : "[  ]",
+             pwr_ia_x10 / 10.0f,
+             pwr_presA ? "OK" : "--");
+    u8g2.drawStr(0, 36, b);
+
+    // Lane B
+    snprintf(b, sizeof(b), "B:%s %s I:%.1f(%s)",
+             pwr_key_ok ? (pwr_armB_seen ? "ARM" : "SAFE") : "LOCK",
+             pwr_onB ? "[ON]" : "[  ]",
+             pwr_ib_x10 / 10.0f,
+             pwr_presB ? "OK" : "--");
+    u8g2.drawStr(0, 48, b);
+
 }
 
 static void drawDiag() {
