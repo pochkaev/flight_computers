@@ -83,6 +83,9 @@
 // Extra debug to Serial (ground status once per second)
 #define DEBUG_GND_STATUS 1
 
+// Profiling: measure task timing and log to SD (0=off, 1=on)
+#define DEBUG_PROFILE 1
+
 // Enable / disable RS-485 power module integration (1=on, 0=off)
 #define ENABLE_POWER_MODULE 1
 

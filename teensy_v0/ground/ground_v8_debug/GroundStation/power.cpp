@@ -103,7 +103,6 @@ static uint8_t rxIdx=0;
 
 static void logPowerStatus() {
   char line[96];
-  // PWR,ign_v=,ia=,ib=,key=,presA=,presB=,fault=,armA=,onA=,armB=,onB=
   snprintf(line, sizeof(line),
            "PWR,ign_v=%.1f,ia=%.1f,ib=%.1f,key=%d,presA=%d,presB=%d,"
            "fault=%d,armA=%d,onA=%d,armB=%d,onB=%d",
@@ -120,7 +119,6 @@ static void logPowerStatus() {
            pwr_onB ? 1 : 0);
   sdlog_write(line);
 }
-
 static void serviceRx(){
   while(pwrSerial.available()){
     uint8_t c = pwrSerial.read();

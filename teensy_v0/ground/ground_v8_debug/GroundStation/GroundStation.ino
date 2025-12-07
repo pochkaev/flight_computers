@@ -10,6 +10,17 @@
 static uint32_t lastPadLogMs = 0;
 static uint32_t lastLostLogMs = 0;
 
+#if DEBUG_PROFILE
+// Simple per-loop timing buckets (microseconds)
+static uint32_t profLoopStartUs   = 0;
+static uint32_t profSensorsUs     = 0;
+static uint32_t profRadioUs       = 0;
+static uint32_t profPowerUs       = 0;
+static uint32_t profLoggingUs     = 0;
+static uint32_t profUiUs          = 0;
+static uint32_t profLoopTotalUs   = 0;
+#endif
+
 void log_pad() {
     char line[256];
     snprintf(line, sizeof(line),
@@ -72,11 +83,15 @@ void setup() {
 }
 
 void loop() {
+    uint32_t t0 = micros();
     sensors_update();
+    uint32_t t1 = micros();
     radio_update();
+    uint32_t t2 = micros();
 #if ENABLE_POWER_MODULE
     power_update();
 #endif
+    uint32_t tAfterPower = micros();
 
     if (!sdlog_hasGpsTime && gps.date.isValid() && gps.time.isValid()) {
         DBG1("GPS TIME ACQUIRED → timestamp logs");
@@ -131,5 +146,38 @@ void loop() {
     }
 #endif
 
+    uint32_t tBeforeUi = micros();
     ui_update();
+
+#if DEBUG_PROFILE
+    uint32_t tEnd = micros();
+
+    profSensorsUs   = t1 - t0;
+    profRadioUs     = t2 - t1;
+#if ENABLE_POWER_MODULE
+    profPowerUs     = tAfterPower - t2;
+#else
+    profPowerUs     = 0;
+#endif
+    // Approximate logging cost as everything between end of power and start of UI
+    profLoggingUs   = tBeforeUi - tAfterPower;
+    profUiUs        = tEnd - tBeforeUi;
+    profLoopTotalUs = tEnd - t0;
+
+    static uint32_t lastProfMs = 0;
+    uint32_t nowMs = millis();
+    if (nowMs - lastProfMs > 200) { // log profiling every 200 ms
+        lastProfMs = nowMs;
+        char line[128];
+        snprintf(line, sizeof(line),
+                 "PROF,loop_us=%lu,sens=%lu,radio=%lu,pwr=%lu,log=%lu,ui=%lu",
+                 (unsigned long)profLoopTotalUs,
+                 (unsigned long)profSensorsUs,
+                 (unsigned long)profRadioUs,
+                 (unsigned long)profPowerUs,
+                 (unsigned long)profLoggingUs,
+                 (unsigned long)profUiUs);
+        sdlog_write(line);
+    }
+#endif
 }
