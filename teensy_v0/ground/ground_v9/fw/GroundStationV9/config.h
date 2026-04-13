@@ -11,7 +11,7 @@
 #define LORA_DIO0_PIN      2
 
 #define SD_CS_PIN          4
-#define BUTTON_PIN         5   // Page change button (active LOW)
+#define BUTTON_PIN         5   // Service / page button (active LOW)
 
 // Launch controller / RS-485 power module (Master)
 // Uses MAX3485 / MAX485 transceiver.
@@ -22,13 +22,15 @@
 // ARM / START switches and LEDs (active-LOW inputs)
 #define PWR_ARM_A_PIN       20
 #define PWR_ARM_B_PIN       21
-#define PWR_START_A_PIN     16
-#define PWR_START_B_PIN     17
+#define PWR_START_A_PIN     22
+#define PWR_START_B_PIN     23
 // Use pins within D1-D23 range for LEDs
-#define PWR_LED_A_PIN       22
-#define PWR_LED_B_PIN       23
+#define PWR_LED_A_PIN       16
+#define PWR_LED_B_PIN       17
 
-// Local battery measurement (3.7V Li-ion via 100k/100k divider)
+// Local battery measurement for ground-station 3S Li-Po.
+// Default divider is conservative for up to about 14 V:
+// Vbat -> 330k -> ADC -> 100k -> GND
 #define PWR_VBAT_PIN        A0
 // Ground battery divider (Vbat -> ADC). Change these to match your resistors.
 #define GND_VBAT_R1_OHMS    330000.0f
@@ -39,6 +41,9 @@
 // LoRa
 #define LORA_FREQUENCY     915E6
 #define LORA_SPI_FREQ      8000000
+#define PKT_TYPE_FLIGHT_V7 0x01
+#define PKT_TYPE_NAV_V7    0x02
+#define PKT_TYPE_STATUS_V8 0x03
 
 // Logging / timing
 #define GPS_WAIT_MS        60000      // 60s to wait for GPS time
@@ -66,7 +71,7 @@
 #define TFT_RST_PIN         28
 
 // Battery placeholders
-#define GROUND_BATT_VOLTAGE   10.0f
+#define GROUND_BATT_VOLTAGE   11.1f
 #define ROCKET_BATT_VOLTAGE    7.0f
 
 // Default rocket name

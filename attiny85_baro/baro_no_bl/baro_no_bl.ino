@@ -6,14 +6,14 @@
 // ----------------------------
 //   CONFIG
 // ----------------------------
-#define BMP_ADDR            0x77
 #define SEA_LEVEL_PRESSURE  101325L    // Pa - can tweak before flight
 
 // I/O pins
 #define TX_PIN        1   // PB1 - software serial TX
 #define I2C_SDA_PIN   0   // PB0 - TinyWireM uses this
 #define I2C_SCL_PIN   2   // PB2 - TinyWireM uses this
-#define BTN_RESET_PIN 3   // PB3 - clear EEPROM if held low at power-on
+#define BTN_RESET_PIN 3   // PB3 - clear EEPROM if held low at power-on / long press in runtime
+#define LONG_PRESS_TICKS  8   // ~2 seconds at the current loop rate
 
 // Altitude filter
 #define ALT_FILTER_SHIFT   0   // alpha = 1 / (2^3) = 1/8 (0-debug, 2-prod)
@@ -134,132 +134,146 @@ void serialPrintFloat100(int32_t value) {
 // ----------------------------
 //   I2C HELPERS (TinyWireM)
 // ----------------------------
-uint8_t bmpRead8(uint8_t reg) {
-  TinyWireM.beginTransmission(BMP_ADDR);
+static uint8_t sensorAddr = 0x76;   // MS5607 supports 0x76 or 0x77
+
+uint8_t sensorRead8(uint8_t reg) {
+  TinyWireM.beginTransmission(sensorAddr);
   TinyWireM.write(reg);
   TinyWireM.endTransmission();
 
-  TinyWireM.requestFrom(BMP_ADDR, (uint8_t)1);
+  TinyWireM.requestFrom(sensorAddr, (uint8_t)1);
   while (TinyWireM.available() < 1) { }
   return TinyWireM.read();
 }
 
-uint16_t bmpRead16(uint8_t reg) {
-  TinyWireM.beginTransmission(BMP_ADDR);
+uint16_t sensorRead16(uint8_t reg) {
+  TinyWireM.beginTransmission(sensorAddr);
   TinyWireM.write(reg);
   TinyWireM.endTransmission();
 
-  TinyWireM.requestFrom(BMP_ADDR, (uint8_t)2);
+  TinyWireM.requestFrom(sensorAddr, (uint8_t)2);
   while (TinyWireM.available() < 2) { }
   uint8_t msb = TinyWireM.read();
   uint8_t lsb = TinyWireM.read();
   return (uint16_t)msb << 8 | lsb;
 }
 
-void bmpWrite8(uint8_t reg, uint8_t val) {
-  TinyWireM.beginTransmission(BMP_ADDR);
+uint32_t sensorRead24(uint8_t reg) {
+  TinyWireM.beginTransmission(sensorAddr);
   TinyWireM.write(reg);
-  TinyWireM.write(val);
+  TinyWireM.endTransmission();
+
+  TinyWireM.requestFrom(sensorAddr, (uint8_t)3);
+  while (TinyWireM.available() < 3) { }
+
+  uint32_t value = (uint32_t)TinyWireM.read() << 16;
+  value |= (uint32_t)TinyWireM.read() << 8;
+  value |= TinyWireM.read();
+  return value;
+}
+
+void sensorWriteCommand(uint8_t cmd) {
+  TinyWireM.beginTransmission(sensorAddr);
+  TinyWireM.write(cmd);
   TinyWireM.endTransmission();
 }
 
-// ----------------------------
-//   BMP085/BMP180 CALIB DATA
-//   (same names as Adafruit lib)
-// ----------------------------
-int16_t  ac1, ac2, ac3, b1, b2, mb, mc, md;
-uint16_t ac4, ac5, ac6;
-uint8_t  oversampling = 0;  // ultra low power (OSS=0)
+bool sensorPresentAt(uint8_t addr) {
+  TinyWireM.beginTransmission(addr);
+  return TinyWireM.endTransmission() == 0;
+}
 
-bool bmpBegin() {
-  uint8_t id = bmpRead8(0xD0);
-  if (id != 0x55) {
+// ----------------------------
+//   MS5607 CALIBRATION + READS
+// ----------------------------
+uint16_t ms5607Prom[8];
+const uint8_t ms5607Osr = 0x08;  // OSR=4096, highest resolution
+
+void ms5607Reset() {
+  sensorWriteCommand(0x1E);
+  delay(3);  // datasheet reset time is 2.8 ms
+}
+
+uint16_t ms5607ReadPromWord(uint8_t index) {
+  return sensorRead16(0xA0 + (index << 1));
+}
+
+uint32_t ms5607ReadAdc() {
+  return sensorRead24(0x00);
+}
+
+uint32_t ms5607StartConversion(uint8_t baseCmd) {
+  sensorWriteCommand(baseCmd | ms5607Osr);
+  delay(10);  // OSR=4096 conversion time
+  return ms5607ReadAdc();
+}
+
+bool ms5607Begin() {
+  if (sensorPresentAt(0x76)) {
+    sensorAddr = 0x76;
+  } else if (sensorPresentAt(0x77)) {
+    sensorAddr = 0x77;
+  } else {
     return false;
   }
 
-  ac1 = (int16_t)bmpRead16(0xAA);
-  ac2 = (int16_t)bmpRead16(0xAC);
-  ac3 = (int16_t)bmpRead16(0xAE);
-  ac4 =          bmpRead16(0xB0);
-  ac5 =          bmpRead16(0xB2);
-  ac6 =          bmpRead16(0xB4);
-  b1  = (int16_t)bmpRead16(0xB6);
-  b2  = (int16_t)bmpRead16(0xB8);
-  mb  = (int16_t)bmpRead16(0xBA);
-  mc  = (int16_t)bmpRead16(0xBC);
-  md  = (int16_t)bmpRead16(0xBE);
+  ms5607Reset();
+
+  for (uint8_t i = 0; i < 8; i++) {
+    ms5607Prom[i] = ms5607ReadPromWord(i);
+  }
+
+  // Require actual calibration words, not all-zero/all-ones PROM.
+  if (ms5607Prom[1] == 0 || ms5607Prom[1] == 0xFFFF) return false;
+  if (ms5607Prom[2] == 0 || ms5607Prom[2] == 0xFFFF) return false;
+  if (ms5607Prom[3] == 0 || ms5607Prom[3] == 0xFFFF) return false;
+  if (ms5607Prom[4] == 0 || ms5607Prom[4] == 0xFFFF) return false;
+  if (ms5607Prom[5] == 0 || ms5607Prom[5] == 0xFFFF) return false;
+  if (ms5607Prom[6] == 0 || ms5607Prom[6] == 0xFFFF) return false;
 
   return true;
 }
 
-// ----------------------------
-//   RAW READS & COMPENSATION
-// ----------------------------
-uint16_t bmpReadRawTemperature() {
-  bmpWrite8(0xF4, 0x2E);
-  delay(5);
-  return bmpRead16(0xF6);
-}
+// Reads temperature in 0.1C and pressure in Pa.
+bool ms5607Read(int16_t* t10Out, int32_t* pressurePaOut) {
+  uint32_t D1 = ms5607StartConversion(0x40);  // pressure
+  uint32_t D2 = ms5607StartConversion(0x50);  // temperature
 
-uint32_t bmpReadRawPressure() {
-  uint32_t raw;
-
-  bmpWrite8(0xF4, 0x34 + (oversampling << 6));
-  delay(5); // enough for OSS=0
-
-  raw = bmpRead16(0xF6);
-  raw <<= 8;
-  raw |= bmpRead8(0xF8);
-  raw >>= (8 - oversampling);
-
-  return raw;
-}
-
-int32_t bmpComputeB5(int32_t UT) {
-  int32_t X1 = (UT - (int32_t)ac6) * ((int32_t)ac5) >> 15;
-  int32_t X2 = ((int32_t)mc << 11) / (X1 + (int32_t)md);
-  return X1 + X2;
-}
-
-// Temperature in 0.1 °C from B5
-int16_t bmpTemp10FromB5(int32_t B5) {
-  return (int16_t)((B5 + 8) >> 4); // 0.1°C
-}
-
-// Pressure in Pa, using existing B5 (no second temp calc)
-int32_t bmpReadPressurePa(int32_t B5) {
-  int32_t UT, UP, B3, B6, X1, X2, X3, p;
-  uint32_t B4, B7;
-
-  // We already calculated B5 from UT outside
-
-  B6 = B5 - 4000;
-
-  X1 = ((int32_t)b2 * ((B6 * B6) >> 12)) >> 11;
-  X2 = ((int32_t)ac2 * B6) >> 11;
-  X3 = X1 + X2;
-  B3 = ((((int32_t)ac1 * 4 + X3) << oversampling) + 2) / 4;
-
-  X1 = ((int32_t)ac3 * B6) >> 13;
-  X2 = ((int32_t)b1 * ((B6 * B6) >> 12)) >> 16;
-  X3 = ((X1 + X2) + 2) >> 2;
-  B4 = ((uint32_t)ac4 * (uint32_t)(X3 + 32768)) >> 15;
-  UP = (int32_t)bmpReadRawPressure();
-  B7 = ((uint32_t)UP - (uint32_t)B3) * (uint32_t)(50000UL >> oversampling);
-
-  if (B7 < 0x80000000UL) {
-    p = (int32_t)((B7 * 2UL) / B4);
-  } else {
-    p = (int32_t)((B7 / B4) * 2UL);
+  if (D1 == 0 || D2 == 0) {
+    return false;
   }
 
-  X1 = (p >> 8) * (p >> 8);
-  X1 = (X1 * 3038L) >> 16;
-  X2 = (-7357L * p) >> 16;
+  int64_t dT   = (int64_t)D2 - ((int64_t)ms5607Prom[5] << 8);
+  int64_t TEMP = 2000LL + ((dT * (int64_t)ms5607Prom[6]) >> 23);                 // 0.01C
+  int64_t OFF  = ((int64_t)ms5607Prom[2] << 17) + ((dT * (int64_t)ms5607Prom[4]) >> 6);
+  int64_t SENS = ((int64_t)ms5607Prom[1] << 16) + ((dT * (int64_t)ms5607Prom[3]) >> 7);
 
-  p = p + ((X1 + X2 + 3791L) >> 4);
+  // Second-order compensation from the MS5607 datasheet.
+  if (TEMP < 2000) {
+    int64_t tLow = TEMP - 2000;
+    int64_t tLow2 = tLow * tLow;
+    int64_t T2 = (dT * dT) >> 31;
+    int64_t OFF2 = (61LL * tLow2) >> 4;
+    int64_t SENS2 = 2LL * tLow2;
 
-  return p;
+    if (TEMP < -1500) {
+      int64_t tVeryLow = TEMP + 1500;
+      int64_t tVeryLow2 = tVeryLow * tVeryLow;
+      OFF2 += 15LL * tVeryLow2;
+      SENS2 += 8LL * tVeryLow2;
+    }
+
+    TEMP -= T2;
+    OFF  -= OFF2;
+    SENS -= SENS2;
+  }
+
+  int64_t pressure100 = ((((int64_t)D1 * SENS) >> 21) - OFF) >> 15;              // 0.01 mbar
+  int32_t pressurePa = (int32_t)pressure100;                                      // 0.01 mbar == 1 Pa
+
+  *t10Out = (int16_t)(TEMP / 10);  // 0.01C -> 0.1C
+  *pressurePaOut = pressurePa;
+  return true;
 }
 
 // ----------------------------
@@ -287,6 +301,45 @@ static bool launched      = false;
 static bool apogeeSaved   = false;
 static int16_t lastAlt    = 0;
 static uint8_t fallingCnt = 0;
+static bool resetHandled  = false;
+static uint8_t btnPressTicks = 0;
+
+void resetFlightTracking() {
+  maxAlt = padAlt;
+  altFiltered32 = padAlt;
+  firstSample = true;
+  launched = false;
+  apogeeSaved = false;
+  lastAlt = padAlt;
+  fallingCnt = 0;
+}
+
+void clearFlightDataRuntime() {
+  clearFlightData();
+  loadFlightData();
+  calibratePadAltitude();
+  resetFlightTracking();
+  serialPrint("RESET ALTITUDE\r\n");
+}
+
+void handleResetButton() {
+  bool pressed = (digitalRead(BTN_RESET_PIN) == LOW);
+
+  if (!pressed) {
+    btnPressTicks = 0;
+    resetHandled = false;
+    return;
+  }
+
+  if (btnPressTicks < 255) {
+    btnPressTicks++;
+  }
+
+  if (!resetHandled && btnPressTicks >= LONG_PRESS_TICKS) {
+    resetHandled = true;
+    clearFlightDataRuntime();
+  }
+}
 
 // ----------------------------
 //   PAD ALTITUDE CALIBRATION
@@ -295,20 +348,26 @@ static uint8_t fallingCnt = 0;
 void calibratePadAltitude() {
   const uint8_t N = 16;
   int32_t sumAlt = 0;
+  uint8_t validSamples = 0;
 
   for (uint8_t i = 0; i < N; i++) {
-    uint16_t UT = bmpReadRawTemperature();
-    int32_t B5 = bmpComputeB5((int32_t)UT);
-    int16_t t10 = bmpTemp10FromB5(B5);  // not used, but keeps flow similar
-    (void)t10;
-    int32_t pres = bmpReadPressurePa(B5);
-    int16_t alt  = calcAltitude(pres);
+    int16_t t10;
+    int32_t pres;
+    if (!ms5607Read(&t10, &pres)) {
+      continue;
+    }
+    int16_t alt = calcAltitude(pres);
 
     sumAlt += alt;
+    validSamples++;
     delay(50);
   }
 
-  padAlt = (int16_t)(sumAlt / N);
+  if (validSamples == 0) {
+    padAlt = 0;
+  } else {
+    padAlt = (int16_t)(sumAlt / validSamples);
+  }
   maxAlt = padAlt;
   altFiltered32 = padAlt;
   lastAlt = padAlt;
@@ -330,8 +389,8 @@ void setup() {
 
   loadFlightData();
 
-  serialPrint("Init BMP...");
-  if (!bmpBegin()) {
+  serialPrint("Init MS5607...");
+  if (!ms5607Begin()) {
     serialPrint("FAIL\r\n");
     while (1) {
       delay(1000);
@@ -343,11 +402,16 @@ void setup() {
 }
 
 void loop() {
-  // 1) Read raw temp and pressure, reuse B5
-  uint16_t UT = bmpReadRawTemperature();
-  int32_t B5  = bmpComputeB5((int32_t)UT);
-  int16_t t10 = bmpTemp10FromB5(B5);      // 0.1 °C
-  int32_t pres = bmpReadPressurePa(B5);   // Pa
+  handleResetButton();
+
+  // 1) Read temperature and pressure from MS5607
+  int16_t t10;
+  int32_t pres;
+  if (!ms5607Read(&t10, &pres)) {
+    serialPrint("Sensor read fail\r\n");
+    delay(500);
+    return;
+  }
 
   // 2) Compute raw altitude (integer meters)
   int16_t alt = calcAltitude(pres);
