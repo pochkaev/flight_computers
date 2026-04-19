@@ -55,7 +55,8 @@ bool power_link_fresh() {
 static float readLocalVbat() {
     int raw = analogRead(PWR_VBAT_PIN);
     float v_pin = (float)raw * ADC_REF_V / ADC_MAX_COUNTS;
-    return v_pin * (GND_VBAT_R1_OHMS + GND_VBAT_R2_OHMS) / GND_VBAT_R2_OHMS;
+    float v_batt = v_pin * (GND_VBAT_R1_OHMS + GND_VBAT_R2_OHMS) / GND_VBAT_R2_OHMS;
+    return v_batt * GND_VBAT_CAL_FACTOR;
 }
 
 // CRC-8 Dallas/Maxim

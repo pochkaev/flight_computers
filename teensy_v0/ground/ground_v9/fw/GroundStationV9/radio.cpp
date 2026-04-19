@@ -57,6 +57,61 @@ FlightPacketV7 flightBuf;
 NavPacketV7    navBuf;
 StatusPacketV8 statusBuf;
 
+static const char *flightStateName(RocketFlightState st) {
+    switch (st) {
+        case FS_IDLE:    return "IDLE";
+        case FS_PAD:     return "PAD";
+        case FS_ASCENT:  return "ASCENT";
+        case FS_COAST:   return "COAST";
+        case FS_DESCENT: return "DESCENT";
+        case FS_LANDED:  return "LANDED";
+        case FS_ABORT:   return "ABORT";
+        default:         return "UNK";
+    }
+}
+
+static void debugFlightPacket() {
+    char line[128];
+    snprintf(line, sizeof(line),
+             "FLIGHT state=%s alt=%.1f vel=%.1f flags=%u rssi=%d",
+             flightStateName(rocketFlightState),
+             rktAltBaroM,
+             rktVelMs,
+             (unsigned int)rktFlags,
+             lastFlightRssi);
+    DBG2(line);
+}
+
+static void debugNavPacket() {
+    char line[160];
+    snprintf(line, sizeof(line),
+             "NAV fix=%u sats=%u hdop=%.1f lat=%.6f lon=%.6f gpsAlt=%.1f rssi=%d",
+             (unsigned int)rktFixType,
+             (unsigned int)rktSats,
+             rktHdop,
+             rktLat,
+             rktLon,
+             rktAltGpsM,
+             lastNavRssi);
+    DBG2(line);
+}
+
+static void debugStatusPacket() {
+    char line[160];
+    snprintf(line, sizeof(line),
+             "STATUS state=%s batt=%.2f gps=%u imu=%u baro=%u sd=%u nand=%u log=%u rssi=%d",
+             flightStateName(rocketFlightState),
+             rocketBattV,
+             rocketGpsOk ? 1u : 0u,
+             rocketImuOk ? 1u : 0u,
+             rocketBaroOk ? 1u : 0u,
+             rocketSdOk ? 1u : 0u,
+             rocketNandOk ? 1u : 0u,
+             rocketLogOk ? 1u : 0u,
+             lastStatusRssi);
+    DBG2(line);
+}
+
 void radio_onReceive(int packetSize) {
     if (packetSize <= 0) {
         while (LoRa.available()) LoRa.read();
@@ -78,7 +133,6 @@ void radio_onReceive(int packetSize) {
         flightPending = true;
         lastFlightRssi = LoRa.packetRssi();
         lastCombinedRssi = lastFlightRssi;
-        DBG2("RX FLIGHT PKT");
     }
     else if (typeByte == PKT_TYPE_NAV_V7) {
         if (remaining != (int)sizeof(NavPacketV7)) {
@@ -92,7 +146,6 @@ void radio_onReceive(int packetSize) {
         navPending = true;
         lastNavRssi = LoRa.packetRssi();
         lastCombinedRssi = lastNavRssi;
-        DBG2("RX NAV PKT");
     }
     else if (typeByte == PKT_TYPE_STATUS_V8) {
         if (remaining != (int)sizeof(StatusPacketV8)) {
@@ -106,7 +159,6 @@ void radio_onReceive(int packetSize) {
         statusPending = true;
         lastStatusRssi = LoRa.packetRssi();
         lastCombinedRssi = lastStatusRssi;
-        DBG2("RX STATUS PKT");
     }
     else {
         while (LoRa.available()) LoRa.read();
@@ -194,8 +246,7 @@ void radio_update() {
         rocketImuOk  = true;
         rocketBaroOk = true;
 
-        DBG3(String("FLIGHT: alt=") + String(pkt.alt_cm/100.0f) +
-            " vel=" + String(pkt.vel_cms/100.0f));
+        debugFlightPacket();
         ui_markDirty();
     }
 
@@ -217,8 +268,7 @@ void radio_update() {
         rktAltBaroM  = pkt.baro_alt_cm / 100.0f;
         rocketHasFix = (rktFixType >= 2);
 
-        DBG3(String("NAV: lat=") + String(rktLat,6) +
-             " lon=" + String(rktLon,6));
+        debugNavPacket();
         ui_markDirty();
     }
 
@@ -229,6 +279,7 @@ void radio_update() {
         interrupts();
 
         rocketStatusLastMs = millis();
+        rocketFlightState = (RocketFlightState)pkt.state;
         rocketBattV = pkt.batt_mv / 1000.0f;
         rktSats = pkt.gps_sats;
         rocketBaroOk = (pkt.health_flags & HEALTH_BARO_OK);
@@ -237,6 +288,7 @@ void radio_update() {
         rocketSdOk   = (pkt.health_flags & HEALTH_SD_OK);
         rocketNandOk = (pkt.health_flags & HEALTH_NAND_OK);
         rocketLogOk  = (pkt.health_flags & HEALTH_LOG_OK);
+        debugStatusPacket();
         ui_markDirty();
     }
 

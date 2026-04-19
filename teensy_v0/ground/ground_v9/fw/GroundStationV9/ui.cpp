@@ -114,8 +114,16 @@ static const char* rocketOverallStatus() {
     uint32_t age = millis() - rocketLastPacketMs;
     if (age > LINK_LOST_MS) return "FAULT";
     if (rktFixType < 2)     return "WARN";
-    if (!rocketImuOk || !rocketBaroOk) return "WARN";
+    if (!rocketImuOk || !rocketBaroOk || !rocketGpsOk) return "WARN";
+    if (!rocketSdOk || !rocketNandOk || !rocketLogOk) return "WARN";
     return "OK";
+}
+
+static uint16_t rocketOverallStatusColor() {
+    const char *status = rocketOverallStatus();
+    if (strcmp(status, "OK") == 0) return COLOR_OK;
+    if (strcmp(status, "WARN") == 0) return COLOR_WARN;
+    return COLOR_BAD;
 }
 
 static const char* rocketStateName() {
@@ -331,6 +339,25 @@ static void drawRocketStatus() {
     if (rktFlags & FLAG_LAUNCH) tft.print("LCH ");
     if (rktFlags & FLAG_APOGEE) tft.print("APO ");
     if (rktFlags & FLAG_LANDED) tft.print("LND ");
+
+    tft.setCursor(10, HDR_H + 148);
+    tft.setTextColor(rocketOverallStatusColor(), COLOR_BG);
+    tft.print("SYS ");
+    tft.setTextColor(rocketGpsOk ? COLOR_OK : COLOR_BAD, COLOR_BG);
+    tft.print("GPS ");
+    tft.setTextColor(rocketImuOk ? COLOR_OK : COLOR_BAD, COLOR_BG);
+    tft.print("IMU ");
+    tft.setTextColor(rocketBaroOk ? COLOR_OK : COLOR_BAD, COLOR_BG);
+    tft.print("BARO");
+
+    tft.setCursor(10, HDR_H + 176);
+    tft.setTextColor(rocketLogOk ? COLOR_OK : COLOR_BAD, COLOR_BG);
+    tft.print("LOG ");
+    tft.setTextColor(rocketSdOk ? COLOR_OK : COLOR_BAD, COLOR_BG);
+    tft.print("SD ");
+    tft.setTextColor(rocketNandOk ? COLOR_OK : COLOR_BAD, COLOR_BG);
+    tft.print("NAND");
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
 }
 
 static void drawFlight() {

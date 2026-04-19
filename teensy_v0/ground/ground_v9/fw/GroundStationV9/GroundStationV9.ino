@@ -9,6 +9,8 @@
 
 static uint32_t lastPadLogMs = 0;
 static uint32_t lastLostLogMs = 0;
+static uint32_t lastFlightLogMs = 0;
+static uint32_t lastRecoveryLogMs = 0;
 
 void log_pad() {
     char line[256];
@@ -58,7 +60,7 @@ void setup() {
     Serial.begin(115200);
     delay(500);
 
-    DBG1("Booting GroundStation...");
+    DBG1("Booting GroundStation V9...");
 
     sensors_init();
     radio_init();
@@ -68,7 +70,7 @@ void setup() {
 #endif
     ui_init();
 
-    DBG1("GroundStation READY");
+    DBG1("GroundStation V9 READY");
 }
 
 void loop() {
@@ -100,10 +102,16 @@ void loop() {
             }
             break;
         case PHASE_FLIGHT:
-            log_flight();
+            if (now - lastFlightLogMs > FLIGHT_LOG_MS) {
+                lastFlightLogMs = now;
+                log_flight();
+            }
             break;
         case PHASE_RECOVERY:
-            log_nav();
+            if (now - lastRecoveryLogMs > RECOVERY_LOG_MS) {
+                lastRecoveryLogMs = now;
+                log_nav();
+            }
             break;
         case PHASE_LOST:
             if (now - lastLostLogMs > PAD_LOSTLOG_MS) {

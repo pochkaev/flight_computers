@@ -22,11 +22,11 @@
 // ARM / START switches and LEDs (active-LOW inputs)
 #define PWR_ARM_A_PIN       20
 #define PWR_ARM_B_PIN       21
-#define PWR_START_A_PIN     22
-#define PWR_START_B_PIN     23
+#define PWR_START_A_PIN     16
+#define PWR_START_B_PIN     17
 // Use pins within D1-D23 range for LEDs
-#define PWR_LED_A_PIN       16
-#define PWR_LED_B_PIN       17
+#define PWR_LED_A_PIN       22
+#define PWR_LED_B_PIN       23
 
 // Local battery measurement for ground-station 3S Li-Po.
 // Default divider is conservative for up to about 14 V:
@@ -35,6 +35,9 @@
 // Ground battery divider (Vbat -> ADC). Change these to match your resistors.
 #define GND_VBAT_R1_OHMS    330000.0f
 #define GND_VBAT_R2_OHMS    100000.0f
+// Calibration factor from measured battery voltage:
+// real 12.10 V / indicated 14.19 V = 0.8527
+#define GND_VBAT_CAL_FACTOR 0.8527132f
 #define ADC_REF_V           3.3f
 #define ADC_MAX_COUNTS      4095.0f
 
@@ -50,6 +53,8 @@
 #define LINK_LOST_MS       10000      // No rocket packets for 10s = signal lost
 #define PAD_PRELOG_MS      5000       // Pre-flight PAD logging
 #define PAD_LOSTLOG_MS     30000      // Logging when signal lost
+#define FLIGHT_LOG_MS      200        // Flight log cadence
+#define RECOVERY_LOG_MS    1000       // Recovery log cadence
 
 // Display
 #define UI_UPDATE_MS       250        // Refresh rate (ms)
@@ -86,26 +91,30 @@
 // Ground GPS (Serial1 -> TinyGPS++) read cadence
 #define GND_GPS_UPDATE_MS        1000
 
-// Debug level: 0..3
-#define DEBUG_LEVEL 2
+// Serial debug:
+// 0 = disabled for field use
+// 1 = boot + important status messages
+// 2 = verbose packet/status debug for bench work
+#define SERIAL_DEBUG_LEVEL 1
 
 // Enable / disable RS-485 power module integration (1=on, 0=off)
 #define ENABLE_POWER_MODULE 1
 
-// Debug macros
-#if DEBUG_LEVEL >= 1
+// Serial debug macros
+#if SERIAL_DEBUG_LEVEL >= 1
   #define DBG1(x) do { Serial.println(x); } while (0)
 #else
   #define DBG1(x) do {} while (0)
 #endif
 
-#if DEBUG_LEVEL >= 2
+#if SERIAL_DEBUG_LEVEL >= 2
   #define DBG2(x) do { Serial.println(x); } while (0)
 #else
   #define DBG2(x) do {} while (0)
 #endif
 
-#if DEBUG_LEVEL >= 3
+// Legacy alias so old DBG3 call sites still map to verbose level 2.
+#if SERIAL_DEBUG_LEVEL >= 2
   #define DBG3(x) do { Serial.println(x); } while (0)
 #else
   #define DBG3(x) do {} while (0)
