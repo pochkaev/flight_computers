@@ -1,0 +1,6 @@
+version=1
+operation_id=1001
+copy_to_sd=1
+clean_nand=0
+require_nand_ok=1
+require_sd_ok=1

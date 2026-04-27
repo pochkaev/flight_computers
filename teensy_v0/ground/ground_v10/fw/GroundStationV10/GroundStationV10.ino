@@ -1,0 +1,209 @@
+#include <Arduino.h>
+#include "config.h"
+#include "state.h"
+#include "radio.h"
+#include "sensors.h"
+#include "sdlog.h"
+#include "ui.h"
+#include "power.h"
+
+static uint32_t lastPadLogMs = 0;
+static uint32_t lastLostLogMs = 0;
+static uint32_t lastFlightLogMs = 0;
+static uint32_t lastRecoveryLogMs = 0;
+
+static const char *phaseName(FlightPhase ph) {
+    switch (ph) {
+        case PHASE_PREFLIGHT: return "PREFLIGHT";
+        case PHASE_FLIGHT: return "FLIGHT";
+        case PHASE_RECOVERY: return "RECOVERY";
+        case PHASE_LOST: return "LOST";
+        default: return "UNK";
+    }
+}
+
+static const char *rocketStateLogName() {
+    switch (rocketFlightState) {
+        case FS_IDLE: return "IDLE";
+        case FS_PAD: return "PAD";
+        case FS_ASCENT: return "ASCENT";
+        case FS_COAST: return "COAST";
+        case FS_DESCENT: return "DESCENT";
+        case FS_LANDED: return "LANDED";
+        case FS_ABORT: return "ABORT";
+        default: return "UNK";
+    }
+}
+
+static const char *rocketBattStatusLogName() {
+    if (rocketBattCrit) return "CRIT";
+    if (rocketBattWarn) return "WARN";
+    if (rocketBattOk) return "OK";
+    return "UNK";
+}
+
+static float ageSeconds(uint32_t lastMs) {
+    if (lastMs == 0) return -1.0f;
+    return (millis() - lastMs) / 1000.0f;
+}
+
+static float rocketRelAltM() {
+    if (isnan(rktBaseAltM)) return rktAltBaroM;
+    return rktAltBaroM - rktBaseAltM;
+}
+
+void log_snapshot(const char *type, FlightPhase ph) {
+    char line[768];
+    snprintf(line, sizeof(line),
+        "%s,ms=%lu,phase=%s,rocket_state=%s,flags=%u,"
+        "rkt_alt_baro=%.1f,rkt_rel_alt=%.1f,rkt_vel=%.1f,"
+        "rkt_lat=%.6f,rkt_lon=%.6f,rkt_gps_alt=%.1f,rkt_fix=%u,rkt_sats=%u,rkt_hdop=%.1f,"
+        "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
+        "distance_m=%.1f,bearing_deg=%.1f,"
+        "rssi_f=%d,rssi_n=%d,rssi_s=%d,rssi_last=%d,"
+        "age_f=%.1f,age_n=%.1f,age_s=%.1f,age_last=%.1f,"
+        "rx_f=%lu,rx_n=%lu,rx_s=%lu,rate_f=%u,rate_n=%u,rate_s=%u,"
+        "miss_f=%lu,miss_n=%lu,miss_s=%lu,"
+        "rkt_batt=%.2f,rkt_batt_status=%s,"
+        "ok_gps=%u,ok_imu=%u,ok_baro=%u,ok_sd=%u,ok_nand=%u,ok_log=%u,"
+        "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u",
+        type,
+        (unsigned long)millis(),
+        phaseName(ph),
+        rocketStateLogName(),
+        (unsigned int)rktFlags,
+        rktAltBaroM,
+        rocketRelAltM(),
+        rktVelMs,
+        rktLat,
+        rktLon,
+        rktAltGpsM,
+        (unsigned int)rktFixType,
+        (unsigned int)rktSats,
+        rktHdop,
+        gndLat,
+        gndLon,
+        gndAltGpsM,
+        gndAltBaroM,
+        (unsigned int)gndSats,
+        gndHdop,
+        distanceToRocketM,
+        bearingToRocketDeg,
+        lastFlightRssi,
+        lastNavRssi,
+        lastStatusRssi,
+        lastCombinedRssi,
+        ageSeconds(lastFlightPacketMs),
+        ageSeconds(lastNavPacketMs),
+        ageSeconds(lastStatusPacketMs),
+        ageSeconds(rocketLastPacketMs),
+        (unsigned long)flightRxCount,
+        (unsigned long)navRxCount,
+        (unsigned long)statusRxCount,
+        (unsigned int)flightRxRate,
+        (unsigned int)navRxRate,
+        (unsigned int)statusRxRate,
+        (unsigned long)flightMissedCount,
+        (unsigned long)navMissedCount,
+        (unsigned long)statusMissedCount,
+        rocketBattV,
+        rocketBattStatusLogName(),
+        rocketGpsOk ? 1u : 0u,
+        rocketImuOk ? 1u : 0u,
+        rocketBaroOk ? 1u : 0u,
+        rocketSdOk ? 1u : 0u,
+        rocketNandOk ? 1u : 0u,
+        rocketLogOk ? 1u : 0u,
+        (unsigned long)gndGpsChars,
+        (unsigned long)gndGpsPassed,
+        (unsigned long)gndGpsFailed,
+        gndGpsLocValid ? 1u : 0u
+    );
+    sdlog_write(line);
+}
+
+void log_pad() {
+    log_snapshot("PAD", PHASE_PREFLIGHT);
+}
+
+void log_flight() {
+    log_snapshot("FLG", PHASE_FLIGHT);
+}
+
+void log_nav() {
+    log_snapshot("NAV", PHASE_RECOVERY);
+}
+
+void log_lost() {
+    log_snapshot("LOST", PHASE_LOST);
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(500);
+
+    DBG1("Booting GroundStation V10...");
+
+    sensors_init();
+    radio_init();
+    sdlog_init();
+#if ENABLE_POWER_MODULE
+    power_init();
+#endif
+    ui_init();
+
+    DBG1("GroundStation V10 READY");
+}
+
+void loop() {
+    sensors_update();
+    radio_update();
+#if ENABLE_POWER_MODULE
+    power_update();
+#endif
+
+    if (!sdlog_hasGpsTime && gps.date.isValid() && gps.time.isValid()) {
+        DBG1("GPS TIME ACQUIRED → timestamp logs");
+        sdlog_onGpsTimeAvailable();
+    }
+
+    uint32_t now = millis();
+    static FlightPhase lastPhase = PHASE_PREFLIGHT;
+    FlightPhase ph = radio_getPhase();
+
+    if (ph != lastPhase) {
+        DBG1(String("PHASE → ") + String(ph));
+        lastPhase = ph;
+    }
+
+    switch (ph) {
+        case PHASE_PREFLIGHT:
+            // Before first rocket packet, ground-only rows do not help flight
+            // reconstruction and can fill the SD with idle bench time.
+            if (rocketLastPacketMs != 0 && now - lastPadLogMs > PAD_PRELOG_MS) {
+                lastPadLogMs = now;
+                log_pad();
+            }
+            break;
+        case PHASE_FLIGHT:
+            if (now - lastFlightLogMs > FLIGHT_LOG_MS) {
+                lastFlightLogMs = now;
+                log_flight();
+            }
+            break;
+        case PHASE_RECOVERY:
+            if (now - lastRecoveryLogMs > RECOVERY_LOG_MS) {
+                lastRecoveryLogMs = now;
+                log_nav();
+            }
+            break;
+        case PHASE_LOST:
+            if (now - lastLostLogMs > PAD_LOSTLOG_MS) {
+                lastLostLogMs = now;
+                log_lost();
+            }
+            break;
+    }
+
+    ui_update();
+}
