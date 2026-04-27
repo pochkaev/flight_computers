@@ -71,6 +71,11 @@ New in `rocket_v10` already implemented:
   - GPS
   - IMU
   - barometer
+- staged non-blocking MS5607 reads:
+  - pressure/altitude target is `50 Hz`
+  - temperature compensation refresh is `5 Hz`
+  - barometer samples no longer block the main loop with back-to-back conversion delays
+- barometer-derived `velZ` uses `BARO_VEL_WINDOW_MS = 120` to avoid amplifying 50 Hz pressure noise
 - baro-driven launch detection:
   - launch uses `relAlt` and `velZ`
   - IMU acceleration is no longer a launch trigger
@@ -89,15 +94,27 @@ New in `rocket_v10` already implemented:
   - this is diagnostic only and does not trigger flight-state changes
 - LSM9DS1 magnetometer is now logged for visualization:
   - SD CSV includes `mx`, `my`, `mz`, and approximate tilt-compensated `yaw`
-  - NAND records use `NandFlightRecordV3`
-  - NAND export is V3-only; legacy V1/V2 decode paths were intentionally removed
+  - NAND V4 full-state records include magnetometer and approximate yaw at `50 Hz`
+  - NAND V4 compact IMU records include accel/gyro/attitude at `200 Hz`
+  - NAND export is current-format only; legacy decode paths are intentionally not kept in production firmware
   - yaw is visualization-only and is not used by the state machine
-- NAND log header `v2` with:
+- Step 3 high-rate IMU logging is complete:
+  - `IMU_UPDATE_MS = 5`
+  - full-state NAND records remain `50 Hz`
+  - compact IMU NAND records are `200 Hz`
+  - full export with `_imu.csv` has been verified
+  - fast export with `export_latest_only=1` and `export_imu=0` has been verified
+- NAND log header version `4` with:
   - record count
   - open/close times
   - final state
   - close reason
   - finalized flag
+  - firmware version
+  - rocket name
+  - configured sensor/log/telemetry rates
+  - IMU ranges
+  - estimator version
 - `FS_LANDED` now keeps logging alive at a lower rate for recovery tracking
 - LED status refresh now runs in the main loop, so a transient stale-sensor event does not leave the external LED stuck in `ERR_GEN`
 - rocket identity is SD-configurable from `/rocket_config.txt`
@@ -129,9 +146,11 @@ Debug output now shows both:
 - `baroFresh`
 - `logFinal`
 
-Current build setting:
+Serial debug setting:
 
-- `SERIAL_DEBUG_LEVEL = 0` for the quiet flight build
+- flight builds should use `SERIAL_DEBUG_LEVEL = 0`
+- bench/service debug builds may use `SERIAL_DEBUG_LEVEL = 1` or `2`
+- the current firmware may be left in a debug setting after export troubleshooting; check [config.h](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/config.h) before field use
 
 ## Flight-state model
 
@@ -166,15 +185,19 @@ NAND role:
 - internal binary recorder
 - file names like `/rocket_flt0041.bin`
 - service export file names like `rocket_nand_0120_op1004.csv`
-- current firmware writes and exports only `NandFlightRecordV3`
-- the NAND header is still `v2`, but record payloads are V3 only
+- service export also writes high-rate IMU files like `rocket_nand_0120_op1004_imu.csv`
+- high-rate IMU CSV export is optional with `export_imu=0`
+- latest-only service export is available with `export_latest_only=1`
+- current firmware writes `RV10NLG` V4 typed records:
+  - type `1`: `50 Hz` full-state records
+  - type `2`: `200 Hz` compact IMU records
+- current firmware exports only the current V4 header/record combination
+- legacy NAND decode paths are intentionally not kept in production firmware; unsupported files are reported as `export_skipped`
 - NAND rotation is enabled:
   - `NAND_ROTATE_ENABLE = 1`
   - `NAND_MIN_FREE_BYTES = 16 MiB`
   - `NAND_MAX_LOG_FILES = 96`
   - oldest `/fltNNNN.bin` files are removed before opening a new log if free space or file-count limits require it
-- April 26, 2026 fix: header rewrite now stores `sizeof(NandFlightRecordV3)`
-- April 26, 2026 recovery behavior: export skips old/unsupported/corrupt files and reports them as `export_skipped`
 - hard export failures are reported as `export_failed` and still block erase
 
 Service mode:
@@ -183,6 +206,9 @@ Service mode:
 - can export NAND logs to SD
 - can erase NAND logs only after successful export path
 - writes `/nand_ops_result.txt`
+- supports quick export options:
+  - `export_latest_only=1`
+  - `export_imu=0`
 - example command file:
   - [nand_ops_example.txt](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/nand_ops_example.txt)
 
@@ -190,7 +216,7 @@ Important:
 
 - NAND service-mode logic exists in firmware
 - because storage is now deferred during GPS acquisition, service-mode processing also starts after GPS acquisition completes or times out
-- it still needs full hardware validation on the rocket
+- V4 service export has been hardware-verified on the rocket
 - result file includes `export_count`, `export_skipped`, and `export_failed`
 - logs are no longer finalized on `FS_LANDED`
 - logs are still finalized on `FS_ABORT` and before service-mode export
@@ -206,7 +232,7 @@ Important:
 
 1. GPS can still be weak inside the device, so it remains diagnostic/secondary and not flight-critical.
 2. Rocket battery must be checked before flight; recent bench telemetry showed a critical 1S voltage around `3.59 V`.
-3. NAND service-mode export should be re-tested on hardware after the V3-only fix.
+3. Full multi-log IMU CSV export is slow by design because it converts `200 Hz` binary IMU records into decimal CSV on Teensy; use `export_latest_only=1` and `export_imu=0` for quick field checks.
 4. Current LoRa telemetry is binary and now scheduled correctly, but future field data may still suggest smaller or different packets.
 
 ## Recommended next work
@@ -216,7 +242,7 @@ Important:
    - `LAUNCH_VEL_MPS = 8 m/s`
    - trend and impossible-velocity guards enabled
 2. hardware-debug the rocket GPS separately if it remains weak inside the device
-3. hardware-test NAND service mode end-to-end with a no-erase export first
+3. update replay tooling to consume V4 full-state plus optional `_imu.csv` exports
 4. inspect SD/NAND logs after the next flight for baro/GPS agreement and yaw visualization quality
 5. consider telemetry packet changes only after reviewing real field data
 

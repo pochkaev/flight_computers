@@ -29,6 +29,11 @@ Compared with `rocket_v8`, `rocket_v10` currently adds:
 - hysteresis for battery warn/crit thresholds
 - debounced flight-state transitions for launch, coast, apogee, and landed
 - freshness tracking for GPS, IMU, and barometer
+- staged non-blocking MS5607 barometer conversions:
+  - pressure/altitude target rate is `50 Hz`
+  - temperature compensation refreshes at `5 Hz`
+  - the main loop no longer waits through full pressure and temperature conversions in one barometer sample
+- barometer vertical velocity is calculated over a short `120 ms` window so the faster pressure stream does not amplify single-sample noise
 - launch detection is baro-driven:
   - `relAlt > LAUNCH_REL_ALT_M`
   - `velZ > LAUNCH_VEL_MPS`
@@ -46,8 +51,14 @@ Compared with `rocket_v8`, `rocket_v10` currently adds:
   - `mx`, `my`, `mz`
   - tilt-compensated `yaw`
   - yaw is not used for flight-state decisions
-- versioned NAND log headers with record counts and finalization state
-- V3-only NAND records and export; legacy V1/V2 export support was removed
+- high-rate onboard IMU logging:
+  - Step 3 high-rate IMU logging is complete
+  - IMU is sampled at `200 Hz`
+  - NAND stores compact IMU records at `200 Hz`
+  - LoRa telemetry rate is unchanged
+  - V4 service export supports both full `_imu.csv` export and quick latest-only full-state export
+- versioned NAND metadata headers with record counts, finalization state, firmware version, rocket name, configured rates, IMU ranges, and estimator version
+- current-only NAND export; old/legacy NAND formats are intentionally not decoded by the firmware
 - post-landing low-rate recovery logging instead of immediate log shutdown
 - corrected LED-mode refresh in the main loop so transient stale sensor windows do not leave the status LED stuck in error mode
 - LoRa telemetry scheduler sends at most one packet per loop, with priority:
@@ -60,7 +71,7 @@ Compared with `rocket_v8`, `rocket_v10` currently adds:
   - file: `/rocket_config.txt`
   - key: `rocket_name`
   - sent to ground in the LoRa identity packet
-- field build currently uses `SERIAL_DEBUG_LEVEL = 0` so USB serial output is quiet during flight use
+- flight builds should use `SERIAL_DEBUG_LEVEL = 0` so USB serial output is quiet during flight use
 
 These changes are meant to reduce false state changes and battery-status flapping on the bench and in flight.
 
@@ -69,15 +80,16 @@ These changes are meant to reduce false state changes and battery-status flappin
 The rocket firmware is now structured so USB serial is optional and not part of the flight-critical path.
 
 - GPS parsing runs continuously in the main loop
-- IMU sampling runs at `100 Hz` via `IMU_UPDATE_MS = 10`
-- barometer/state update runs at `20 Hz` via `BARO_UPDATE_MS = 50`
+- IMU sampling runs at `200 Hz` via `IMU_UPDATE_MS = 5`
+- barometer/state update targets `50 Hz` pressure samples via `BARO_UPDATE_MS = 20`
+- MS5607 temperature compensation refreshes at `5 Hz` via `BARO_TEMP_UPDATE_MS = 200`
 - battery update runs at `10 Hz` via `BATT_UPDATE_MS = 100`
 - flight telemetry runs at `5 Hz`
 - navigation telemetry runs at `1 Hz`
 - status telemetry runs at `0.5 Hz`
 - identity telemetry runs every `5 s`
 - SD CSV logging runs at `5 Hz`
-- NAND binary logging runs at `5 Hz`
+- NAND binary logging writes `50 Hz` full-state records plus `200 Hz` compact IMU records
 - SD and NAND flush run at `1 Hz`
 - serial debug runs only when `SERIAL_DEBUG_LEVEL > 0`
 
@@ -384,17 +396,21 @@ Current storage roles:
 - NAND:
   - resilient onboard recorder
   - file names like `/rocket_flt0041.bin`
-  - fixed-size `NandFlightRecordV3` binary records for later export
+  - typed V4 binary records for later export
   - rotates oldest `/fltNNNN.bin` logs before opening a new log if NAND is near full
 
 NAND format status:
 
-- current firmware writes `NandFlightRecordV3` only
-- current export decodes V3 only
-- legacy V1/V2 record decode paths were intentionally removed
-- the file header is `NandLogHeaderV2`
-- the header `record_size` must be `sizeof(NandFlightRecordV3)`
-- April 26, 2026 compatibility fix: export treats `RV10NLG` payloads as V3 even if an older bad header contains the wrong record size
+- current firmware writes `RV10NLG` header version `4`
+- current firmware writes typed V4 payload records:
+  - type `1`: `50 Hz` full-state records
+  - type `2`: `200 Hz` compact IMU records
+- current export decodes only the current V4 header/record combination:
+  - `header.version = 4`
+  - `header.record_format = 4`
+- there is no legacy NAND decode path in flight firmware
+- old/unsupported/corrupt files are skipped during service export
+- exported CSV files include metadata comment lines before the CSV header
 
 NAND full handling:
 
@@ -405,8 +421,8 @@ NAND full handling:
   - `NAND_MIN_FREE_BYTES = 16 MiB`
   - `NAND_MAX_LOG_FILES = 96`
   - `NAND_ROTATE_ENABLE = 1`
-- one V3 record is `78` bytes; at `5 Hz`, NAND logging is about `1.4 MB/hour`
-- the 16 MiB reserve is roughly 11 hours of 5 Hz V3 logging headroom
+- V4 writes `50 Hz` full-state records plus `200 Hz` compact IMU records, roughly `34 MB/hour`
+- the 16 MiB reserve is roughly 28 minutes of V4 logging headroom
 - rotation happens before opening a new log, not in the middle of an active flight log
 
 Important detail:
@@ -448,6 +464,8 @@ version=1
 operation_id=42
 copy_to_sd=1
 clean_nand=0
+export_latest_only=0
+export_imu=1
 require_nand_ok=1
 require_sd_ok=1
 ```
@@ -456,11 +474,16 @@ Aliases currently accepted:
 
 - `copy_to_sd` or `export_to_sd`
 - `clean_nand` or `erase_nand_after_export`
+- `export_latest_only` or `latest_only`
+- `export_imu` or `copy_imu`
 
 Behavior:
 
 - `copy_to_sd=1` exports NAND binary logs to CSV files on SD
-- `clean_nand=1` removes NAND flight log files only after current V3 export completes without hard I/O failures
+- `clean_nand=1` removes NAND flight log files only after current V4 export completes without hard I/O failures
+- `export_latest_only=1` exports only the newest NAND log and skips older logs
+- `export_imu=0` skips the large high-rate IMU CSV and exports only the full-state CSV
+- full multi-log export with `export_imu=1` can be slow because the Teensy formats large `200 Hz` IMU streams as decimal CSV text
 - result file is written to `/nand_ops_result.txt`
 - command file `/nand_ops.txt` is removed only if the requested operation succeeds
 - test template file:
@@ -473,7 +496,20 @@ Recommended first hardware test:
 3. boot the rocket controller
 4. after success, inspect:
    - `/nand_ops_result.txt`
-   - exported `nand_*.csv` files on SD
+   - exported `rocket_nand_*.csv` files on SD
+
+Recommended quick field export:
+
+```ini
+version=1
+operation_id=1013
+copy_to_sd=1
+clean_nand=0
+export_latest_only=1
+export_imu=0
+require_nand_ok=1
+require_sd_ok=1
+```
 
 Important guard:
 
@@ -481,22 +517,23 @@ Important guard:
 
 This is intentional to reduce risk of deleting the only copy of flight data.
 
-Current V3-only behavior:
+Current-only NAND export behavior:
 
-- valid `RV10NLG` files with `NandFlightRecordV3` payloads are exported
-- exported CSV names look like `rocket_nand_0120_op1004.csv`
+- valid current-format `RV10NLG` V4 files are exported
+- full-state CSV names look like `rocket_nand_0120_op1004.csv`
+- high-rate IMU CSV names look like `rocket_nand_0120_op1004_imu.csv`
+- high-rate IMU CSV is optional with `export_imu=0`
+- latest-only export is optional with `export_latest_only=1`
 - old/unsupported/corrupt files are counted as `export_skipped`
 - hard read/write/open failures are counted as `export_failed`
 - `export_skipped` does not block `clean_nand=1`
 - `export_failed` blocks erase and leaves `/nand_ops.txt` in place
 
-April 26, 2026 field issue and fix:
+Legacy policy:
 
-- During a flight with no SD card inserted, exported NAND CSVs were empty/zeroed.
-- The root firmware issue was a NAND header rewrite that stored the old V1 record size while the logger wrote V3 records.
-- The export path is now V3-only and skips files that are not plausible current V3 records.
-- The erase path now closes each directory entry before removing the NAND file.
-- Always test `copy_to_sd=1` with `clean_nand=0` before enabling erase.
+- production firmware does not keep legacy NAND decoders
+- when NAND format changes, old unsupported files are skipped instead of decoded
+- this keeps field firmware smaller and easier to reason about
 
 Connection note:
 

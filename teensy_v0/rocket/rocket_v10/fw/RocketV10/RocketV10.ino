@@ -44,6 +44,14 @@ static const uint16_t FLAG_APOGEE = 1 << 1;
 static const uint16_t FLAG_LANDED = 1 << 2;
 
 static const uint16_t DIAG_BARO_GPS_DIVERGE = 1 << 0;
+static const uint8_t NAND_RECORD_FULL_STATE_V4 = 1;
+static const uint8_t NAND_RECORD_IMU_V4 = 2;
+
+enum BaroReadStatus {
+  BARO_READ_WAITING = 0,
+  BARO_READ_SAMPLE = 1,
+  BARO_READ_ERROR = 2
+};
 
 struct __attribute__((packed)) FlightPacketV7 {
   uint8_t  version;
@@ -103,7 +111,7 @@ struct __attribute__((packed)) IdentityPacketV1 {
 };
 static_assert(sizeof(IdentityPacketV1) == 28, "IdentityPacketV1 size mismatch");
 
-struct __attribute__((packed)) NandLogHeaderV2 {
+struct __attribute__((packed)) NandLogHeaderV3 {
   char     magic[8];
   uint16_t version;
   uint16_t header_size;
@@ -118,8 +126,63 @@ struct __attribute__((packed)) NandLogHeaderV2 {
   uint8_t  close_reason;
   uint16_t reserved0;
   uint32_t reserved1;
+  char     firmware_version[16];
+  char     rocket_name[16];
+  uint16_t imu_hz;
+  uint16_t baro_hz;
+  uint16_t nand_log_hz;
+  uint16_t sd_log_hz;
+  uint16_t flight_tx_hz_x10;
+  uint16_t nav_tx_hz_x10;
+  uint16_t status_tx_hz_x10;
+  uint16_t identity_tx_hz_x10;
+  uint16_t recovery_flight_tx_hz_x10;
+  uint16_t recovery_nav_tx_hz_x10;
+  uint16_t recovery_status_tx_hz_x10;
+  uint16_t recovery_nand_log_hz_x10;
+  uint16_t recovery_sd_log_hz_x10;
+  uint16_t gyro_range_dps;
+  uint8_t  accel_range_g;
+  uint8_t  mag_range_gauss;
+  uint8_t  estimator_version;
+  uint8_t  record_format;
+  uint8_t  reserved2[20];
 };
-static_assert(sizeof(NandLogHeaderV2) == 44, "NandLogHeaderV2 size mismatch");
+static_assert(sizeof(NandLogHeaderV3) == 128, "NandLogHeaderV3 size mismatch");
+
+struct NandLogMetadata {
+  uint16_t header_version = 0;
+  uint16_t header_size = 0;
+  uint16_t record_size = 0;
+  uint16_t flags = 0;
+  uint32_t flight_index = 0;
+  uint32_t boot_ms = 0;
+  uint32_t open_ms = 0;
+  uint32_t close_ms = 0;
+  uint32_t record_count = 0;
+  uint8_t final_state = 0;
+  uint8_t close_reason = 0;
+  char firmware_version[16] = "";
+  char rocket_name[16] = "";
+  uint16_t imu_hz = 0;
+  uint16_t baro_hz = 0;
+  uint16_t nand_log_hz = 0;
+  uint16_t sd_log_hz = 0;
+  uint16_t flight_tx_hz_x10 = 0;
+  uint16_t nav_tx_hz_x10 = 0;
+  uint16_t status_tx_hz_x10 = 0;
+  uint16_t identity_tx_hz_x10 = 0;
+  uint16_t recovery_flight_tx_hz_x10 = 0;
+  uint16_t recovery_nav_tx_hz_x10 = 0;
+  uint16_t recovery_status_tx_hz_x10 = 0;
+  uint16_t recovery_nand_log_hz_x10 = 0;
+  uint16_t recovery_sd_log_hz_x10 = 0;
+  uint16_t gyro_range_dps = 0;
+  uint8_t accel_range_g = 0;
+  uint8_t mag_range_gauss = 0;
+  uint8_t estimator_version = 0;
+  uint8_t record_format = 0;
+};
 
 struct __attribute__((packed)) NandFlightRecordV3 {
   uint32_t ms;
@@ -157,11 +220,40 @@ struct __attribute__((packed)) NandFlightRecordV3 {
 };
 static_assert(sizeof(NandFlightRecordV3) == 78, "NandFlightRecordV3 size mismatch");
 
+struct __attribute__((packed)) NandFullStateRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  NandFlightRecordV3 data;
+};
+static_assert(sizeof(NandFullStateRecordV4) == 82, "NandFullStateRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandImuRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  int16_t ax_cms2;
+  int16_t ay_cms2;
+  int16_t az_cms2;
+  int16_t gx_cdeg;
+  int16_t gy_cdeg;
+  int16_t gz_cdeg;
+  int16_t roll_cdeg;
+  int16_t pitch_cdeg;
+  int16_t yaw_cdeg;
+  uint8_t state;
+  uint8_t flags;
+};
+static_assert(sizeof(NandImuRecordV4) == 28, "NandImuRecordV4 size mismatch");
+
 struct ServiceRequest {
   bool valid = false;
   uint32_t operationId = 0;
   bool exportToSd = false;
   bool eraseNandAfterExport = false;
+  bool exportLatestOnly = false;
+  bool exportImu = true;
   bool requireNandOk = true;
   bool requireSdOk = true;
 };
@@ -199,14 +291,55 @@ public:
     return prom_[1] != 0 && prom_[1] != 0xFFFF;
   }
 
-  bool read(float &tempC, float &pressurePa, float &altM) {
-    if (!address_) return false;
+  BaroReadStatus update(float &tempC, float &pressurePa, float &altM) {
+    if (!address_) return BARO_READ_ERROR;
 
-    uint32_t d1 = 0;
-    uint32_t d2 = 0;
-    if (!readAdc(0x48, d1)) return false; // D1 OSR=4096
-    if (!readAdc(0x58, d2)) return false; // D2 OSR=4096
+    uint32_t nowUs = micros();
+    if (conversion_ == CONV_NONE) {
+      return startNextConversion() ? BARO_READ_WAITING : BARO_READ_ERROR;
+    }
 
+    if ((uint32_t)(nowUs - conversionStartUs_) < MS5607_CONVERSION_US) {
+      return BARO_READ_WAITING;
+    }
+
+    uint32_t adc = 0;
+    uint8_t completed = conversion_;
+    conversion_ = CONV_NONE;
+    if (!readAdcResult(adc)) return BARO_READ_ERROR;
+
+    if (completed == CONV_D2) {
+      d2_ = adc;
+      haveD2_ = true;
+      lastTempMs_ = millis();
+      return startNextConversion() ? BARO_READ_WAITING : BARO_READ_ERROR;
+    }
+
+    d1_ = adc;
+    if (!haveD2_) {
+      return startNextConversion() ? BARO_READ_WAITING : BARO_READ_ERROR;
+    }
+
+    if (!calculateSample(tempC, pressurePa, altM)) return BARO_READ_ERROR;
+    if (!startNextConversion()) return BARO_READ_ERROR;
+    return BARO_READ_SAMPLE;
+  }
+
+private:
+  static const uint8_t CONV_NONE = 0;
+  static const uint8_t CONV_D1 = 1;
+  static const uint8_t CONV_D2 = 2;
+
+  uint8_t address_ = 0;
+  uint16_t prom_[8] = {};
+  uint8_t conversion_ = CONV_NONE;
+  uint32_t conversionStartUs_ = 0;
+  uint32_t lastTempMs_ = 0;
+  uint32_t d1_ = 0;
+  uint32_t d2_ = 0;
+  bool haveD2_ = false;
+
+  bool calculateSample(float &tempC, float &pressurePa, float &altM) {
     const int64_t C1 = prom_[1];
     const int64_t C2 = prom_[2];
     const int64_t C3 = prom_[3];
@@ -214,7 +347,7 @@ public:
     const int64_t C5 = prom_[5];
     const int64_t C6 = prom_[6];
 
-    int64_t dT = (int64_t)d2 - (C5 << 8);
+    int64_t dT = (int64_t)d2_ - (C5 << 8);
     int64_t temp = 2000 + ((dT * C6) >> 23);
     // MS5607 uses one-bit larger OFF/SENS scaling than MS5611-style code.
     // The previous shifts produced pressure near 0.5x real value.
@@ -240,7 +373,7 @@ public:
     off -= off2;
     sens -= sens2;
 
-    int32_t pressure = (int32_t)(((((int64_t)d1 * sens) >> 21) - off) >> 15);
+    int32_t pressure = (int32_t)(((((int64_t)d1_ * sens) >> 21) - off) >> 15);
     tempC = temp / 100.0f;
     pressurePa = (float)pressure;
 
@@ -248,10 +381,6 @@ public:
     altM = 44330.0f * (1.0f - powf(pressureHpa / SEA_LEVEL_PRESSURE_HPA, 0.1903f));
     return isfinite(tempC) && isfinite(pressurePa) && isfinite(altM);
   }
-
-private:
-  uint8_t address_ = 0;
-  uint16_t prom_[8] = {};
 
   bool probe(uint8_t addr) {
     Wire.beginTransmission(addr);
@@ -276,12 +405,22 @@ private:
     return (Wire.read() << 8) | Wire.read();
   }
 
-  bool readAdc(uint8_t cmd, uint32_t &value) {
+  bool startNextConversion() {
+    uint32_t nowMs = millis();
+    bool tempDue = !haveD2_ || (uint32_t)(nowMs - lastTempMs_) >= BARO_TEMP_UPDATE_MS;
+    return startConversion(tempDue ? 0x58 : 0x48, tempDue ? CONV_D2 : CONV_D1);
+  }
+
+  bool startConversion(uint8_t cmd, uint8_t conversion) {
     Wire.beginTransmission(address_);
     Wire.write(cmd);
     if (Wire.endTransmission() != 0) return false;
-    delay(10);
+    conversion_ = conversion;
+    conversionStartUs_ = micros();
+    return true;
+  }
 
+  bool readAdcResult(uint32_t &value) {
     Wire.beginTransmission(address_);
     Wire.write(0x00);
     if (Wire.endTransmission() != 0) return false;
@@ -326,6 +465,11 @@ File nandLogFile;
 char nandLogPath[32] = "";
 uint32_t nextLogIndex = 1;
 uint32_t nandRecordCount = 0;
+#if HAS_LITTLEFS_QPINAND
+uint8_t nandLogCache[NAND_LOG_CACHE_BYTES];
+uint16_t nandLogCacheBytes = 0;
+uint16_t nandRecordSequence = 0;
+#endif
 bool logsFinalized = false;
 uint32_t currentLogIndex = 0;
 uint32_t nandLogOpenMs = 0;
@@ -355,6 +499,8 @@ float maxAltM = 0.0f;
 float maxVelMps = 0.0f;
 float apogeeAltM = NAN;
 float lastAltRaw = 0.0f;
+float velRefAltM = 0.0f;
+uint32_t velRefMs = 0;
 float rocketBattV = 0.0f;
 
 float last_ax = 0.0f;
@@ -430,6 +576,27 @@ static BatteryPackType detectBatteryPack(float battV) {
     return (battV >= BATT_2S_DETECT_UP_V) ? BATT_PACK_2S : BATT_PACK_1S;
   }
   return (battV >= BATT_2S_DETECT_UP_V) ? BATT_PACK_2S : BATT_PACK_1S;
+}
+
+static float wrapPi(float angle) {
+  while (angle > PI) angle -= 2.0f * PI;
+  while (angle < -PI) angle += 2.0f * PI;
+  return angle;
+}
+
+static float angleDelta(float from, float to) {
+  return wrapPi(to - from);
+}
+
+static void copyFixedString(char *dst, size_t dstSize, const char *src) {
+  if (!dst || dstSize == 0) return;
+  if (!src) src = "";
+  size_t i = 0;
+  while (i + 1 < dstSize && src[i] != '\0') {
+    dst[i] = src[i];
+    i++;
+  }
+  dst[i] = '\0';
 }
 
 static bool thresholdLowWithHysteresis(float value, float threshold, float hysteresis, bool alreadyLow) {
@@ -769,11 +936,11 @@ static bool rewriteNandLogHeader(bool finalized, NandCloseReason closeReason) {
 #if HAS_LITTLEFS_QPINAND
   if (!nandLogFile) return false;
 
-  NandLogHeaderV2 header = {};
+  NandLogHeaderV3 header = {};
   memcpy(header.magic, "RV10NLG", 8);
-  header.version = 2;
+  header.version = 4;
   header.header_size = sizeof(header);
-  header.record_size = sizeof(NandFlightRecordV3);
+  header.record_size = 0;
   header.flags = finalized ? NAND_LOG_FLAG_FINALIZED : 0;
   header.flight_index = currentLogIndex;
   header.boot_ms = nandLogOpenMs;
@@ -782,6 +949,26 @@ static bool rewriteNandLogHeader(bool finalized, NandCloseReason closeReason) {
   header.record_count = nandRecordCount;
   header.final_state = (uint8_t)flightState;
   header.close_reason = (uint8_t)closeReason;
+  copyFixedString(header.firmware_version, sizeof(header.firmware_version), ROCKET_FW_VERSION);
+  copyFixedString(header.rocket_name, sizeof(header.rocket_name), rocketName);
+  header.imu_hz = 1000u / IMU_UPDATE_MS;
+  header.baro_hz = 1000u / BARO_UPDATE_MS;
+  header.nand_log_hz = 1000u / NAND_LOG_UPDATE_MS;
+  header.sd_log_hz = 1000u / SD_LOG_UPDATE_MS;
+  header.flight_tx_hz_x10 = 10000u / FLIGHT_TX_MS;
+  header.nav_tx_hz_x10 = 10000u / NAV_TX_MS;
+  header.status_tx_hz_x10 = 10000u / STATUS_TX_MS;
+  header.identity_tx_hz_x10 = 10000u / IDENTITY_TX_MS;
+  header.recovery_flight_tx_hz_x10 = 10000u / RECOVERY_FLIGHT_TX_MS;
+  header.recovery_nav_tx_hz_x10 = 10000u / RECOVERY_NAV_TX_MS;
+  header.recovery_status_tx_hz_x10 = 10000u / RECOVERY_STATUS_TX_MS;
+  header.recovery_nand_log_hz_x10 = 10000u / RECOVERY_NAND_LOG_UPDATE_MS;
+  header.recovery_sd_log_hz_x10 = 10000u / RECOVERY_SD_LOG_UPDATE_MS;
+  header.gyro_range_dps = IMU_GYRO_RANGE_DPS;
+  header.accel_range_g = IMU_ACCEL_RANGE_G;
+  header.mag_range_gauss = IMU_MAG_RANGE_GAUSS;
+  header.estimator_version = ATTITUDE_ESTIMATOR_V2;
+  header.record_format = NAND_RECORD_FORMAT_V4;
 
   size_t endPos = nandLogFile.size();
   if (!nandLogFile.seek(0)) return false;
@@ -792,6 +979,45 @@ static bool rewriteNandLogHeader(bool finalized, NandCloseReason closeReason) {
 #else
   (void)finalized;
   (void)closeReason;
+  return false;
+#endif
+}
+
+static bool flushNandLogCache() {
+#if HAS_LITTLEFS_QPINAND
+  if (nandLogCacheBytes == 0) return true;
+  if (!nandLogFile) {
+    nandLogCacheBytes = 0;
+    return false;
+  }
+
+  const size_t bytesToWrite = nandLogCacheBytes;
+  if (nandLogFile.write((const uint8_t *)nandLogCache, bytesToWrite) != bytesToWrite) {
+    nandLogCacheBytes = 0;
+    nandLogOk = false;
+    nandLogFile.close();
+    return false;
+  }
+  nandLogCacheBytes = 0;
+  return true;
+#else
+  return false;
+#endif
+}
+
+static bool appendNandRecord(const void *record, uint16_t size) {
+#if HAS_LITTLEFS_QPINAND
+  if (size > NAND_LOG_CACHE_BYTES) return false;
+  if ((uint32_t)nandLogCacheBytes + size > NAND_LOG_CACHE_BYTES) {
+    if (!flushNandLogCache()) return false;
+  }
+  memcpy(nandLogCache + nandLogCacheBytes, record, size);
+  nandLogCacheBytes += size;
+  nandRecordCount++;
+  return true;
+#else
+  (void)record;
+  (void)size;
   return false;
 #endif
 }
@@ -807,9 +1033,11 @@ static void finalizeLogFiles(NandCloseReason closeReason) {
 
 #if HAS_LITTLEFS_QPINAND
   if (nandLogFile) {
+    flushNandLogCache();
     nandLogOk = rewriteNandLogHeader(true, closeReason);
     nandLogFile.close();
   }
+  nandLogCacheBytes = 0;
   nandLogOk = false;
 #endif
 
@@ -849,11 +1077,11 @@ static void ensureLogOpen() {
     nandLogPath[sizeof(nandLogPath) - 1] = '\0';
     nandLogFile = qspiNand.open(filename, FILE_WRITE);
     if (nandLogFile) {
-      NandLogHeaderV2 header = {};
+      NandLogHeaderV3 header = {};
       memcpy(header.magic, "RV10NLG", 8);
-      header.version = 2;
+      header.version = 4;
       header.header_size = sizeof(header);
-      header.record_size = sizeof(NandFlightRecordV3);
+      header.record_size = 0;
       header.flags = 0;
       header.flight_index = nextLogIndex;
       header.boot_ms = millis();
@@ -862,7 +1090,29 @@ static void ensureLogOpen() {
       header.record_count = 0;
       header.final_state = (uint8_t)flightState;
       header.close_reason = (uint8_t)NAND_CLOSE_NONE;
+      copyFixedString(header.firmware_version, sizeof(header.firmware_version), ROCKET_FW_VERSION);
+      copyFixedString(header.rocket_name, sizeof(header.rocket_name), rocketName);
+      header.imu_hz = 1000u / IMU_UPDATE_MS;
+      header.baro_hz = 1000u / BARO_UPDATE_MS;
+      header.nand_log_hz = 1000u / NAND_LOG_UPDATE_MS;
+      header.sd_log_hz = 1000u / SD_LOG_UPDATE_MS;
+      header.flight_tx_hz_x10 = 10000u / FLIGHT_TX_MS;
+      header.nav_tx_hz_x10 = 10000u / NAV_TX_MS;
+      header.status_tx_hz_x10 = 10000u / STATUS_TX_MS;
+      header.identity_tx_hz_x10 = 10000u / IDENTITY_TX_MS;
+      header.recovery_flight_tx_hz_x10 = 10000u / RECOVERY_FLIGHT_TX_MS;
+      header.recovery_nav_tx_hz_x10 = 10000u / RECOVERY_NAV_TX_MS;
+      header.recovery_status_tx_hz_x10 = 10000u / RECOVERY_STATUS_TX_MS;
+      header.recovery_nand_log_hz_x10 = 10000u / RECOVERY_NAND_LOG_UPDATE_MS;
+      header.recovery_sd_log_hz_x10 = 10000u / RECOVERY_SD_LOG_UPDATE_MS;
+      header.gyro_range_dps = IMU_GYRO_RANGE_DPS;
+      header.accel_range_g = IMU_ACCEL_RANGE_G;
+      header.mag_range_gauss = IMU_MAG_RANGE_GAUSS;
+      header.estimator_version = ATTITUDE_ESTIMATOR_V2;
+      header.record_format = NAND_RECORD_FORMAT_V4;
       nandRecordCount = 0;
+      nandLogCacheBytes = 0;
+      nandRecordSequence = 0;
       currentLogIndex = nextLogIndex;
       nandLogOpenMs = header.open_ms;
       nandLogOk = nandLogFile.write((const uint8_t *)&header, sizeof(header)) == sizeof(header);
@@ -883,7 +1133,7 @@ static void ensureLogOpen() {
   logOk = sdLogOk || nandLogOk || logsFinalized;
 }
 
-static void logCsv() {
+static void logSdCsv() {
   ensureLogOpen();
   const uint32_t nowMs = millis();
   const float relAlt = currentBaroRelAltM();
@@ -934,18 +1184,76 @@ static void logCsv() {
       sdLogFile.close();
     }
   }
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
 
 #if HAS_LITTLEFS_QPINAND
+static void fillNandFlightRecord(NandFlightRecordV3 &rec, uint32_t nowMs,
+                                 float relAlt, uint16_t healthFlags) {
+  rec = {};
+  rec.ms = nowMs;
+  rec.health_flags = healthFlags;
+  rec.flight_flags = flightFlags;
+  rec.alt_cm = (int32_t)lroundf(filtAlt * 100.0f);
+  rec.rel_alt_cm = (int32_t)lroundf(relAlt * 100.0f);
+  rec.vel_cms = (int16_t)lroundf(velZ * 100.0f);
+  rec.temp_centi_c = (int16_t)lroundf(filtTempC * 100.0f);
+  rec.pressure_pa_x10 = (uint32_t)lroundf(filtPressurePa * 10.0f);
+  rec.ax_cms2 = (int16_t)lroundf(last_ax * 100.0f);
+  rec.ay_cms2 = (int16_t)lroundf(last_ay * 100.0f);
+  rec.az_cms2 = (int16_t)lroundf(last_az * 100.0f);
+  rec.gx_cdeg = (int16_t)lroundf(last_gx * 100.0f);
+  rec.gy_cdeg = (int16_t)lroundf(last_gy * 100.0f);
+  rec.gz_cdeg = (int16_t)lroundf(last_gz * 100.0f);
+  rec.roll_cdeg = (int16_t)lroundf(roll * 5729.57795f);
+  rec.pitch_cdeg = (int16_t)lroundf(pitch * 5729.57795f);
+  rec.gps_lat_e7 = (int32_t)llround(gpsLatDeg * 1e7);
+  rec.gps_lon_e7 = (int32_t)llround(gpsLonDeg * 1e7);
+  rec.gps_alt_cm = (int32_t)lroundf(gpsAltM * 100.0f);
+  rec.gps_rel_alt_cm = haveGpsBaseAlt ? (int32_t)lroundf(gpsRelAltM * 100.0f) : INT32_MIN;
+  rec.baro_gps_delta_cm = isfinite(baroGpsDeltaM) ? (int32_t)lroundf(baroGpsDeltaM * 100.0f) : INT32_MIN;
+  rec.gps_speed_cms = (int16_t)lroundf(gpsSpeedMps * 100.0f);
+  rec.batt_mv = (uint16_t)lroundf(rocketBattV * 1000.0f);
+  rec.diag_flags = diagFlags;
+  rec.mx_centiuT = (int16_t)lroundf(last_mx * 100.0f);
+  rec.my_centiuT = (int16_t)lroundf(last_my * 100.0f);
+  rec.mz_centiuT = (int16_t)lroundf(last_mz * 100.0f);
+  rec.yaw_cdeg = (int16_t)lroundf(yaw * 5729.57795f);
+  rec.state = (uint8_t)flightState;
+  rec.gps_fix_type = gpsFixType;
+  rec.gps_sats = gpsSats;
+  rec.battery_pack = (uint8_t)batteryPack;
+}
+#endif
+
+static void logNandBinary() {
+#if HAS_LITTLEFS_QPINAND
+  ensureLogOpen();
   if (nandLogFile) {
-    NandFlightRecordV3 rec = {};
+    NandFullStateRecordV4 rec = {};
+    rec.type = NAND_RECORD_FULL_STATE_V4;
+    rec.size = sizeof(rec);
+    rec.sequence = nandRecordSequence++;
+    fillNandFlightRecord(rec.data, millis(), currentBaroRelAltM(), buildHealthFlags());
+    if (!appendNandRecord(&rec, sizeof(rec))) {
+      nandLogOk = false;
+      if (nandLogFile) nandLogFile.close();
+    }
+  }
+#endif
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
+
+static void logNandImuBinary(uint32_t nowMs) {
+#if HAS_LITTLEFS_QPINAND
+  if (flightState == FS_LANDED || flightState == FS_ABORT) return;
+  ensureLogOpen();
+  if (nandLogFile) {
+    NandImuRecordV4 rec = {};
+    rec.type = NAND_RECORD_IMU_V4;
+    rec.size = sizeof(rec);
+    rec.sequence = nandRecordSequence++;
     rec.ms = nowMs;
-    rec.health_flags = healthFlags;
-    rec.flight_flags = flightFlags;
-    rec.alt_cm = (int32_t)lroundf(filtAlt * 100.0f);
-    rec.rel_alt_cm = (int32_t)lroundf(relAlt * 100.0f);
-    rec.vel_cms = (int16_t)lroundf(velZ * 100.0f);
-    rec.temp_centi_c = (int16_t)lroundf(filtTempC * 100.0f);
-    rec.pressure_pa_x10 = (uint32_t)lroundf(filtPressurePa * 10.0f);
     rec.ax_cms2 = (int16_t)lroundf(last_ax * 100.0f);
     rec.ay_cms2 = (int16_t)lroundf(last_ay * 100.0f);
     rec.az_cms2 = (int16_t)lroundf(last_az * 100.0f);
@@ -954,36 +1262,26 @@ static void logCsv() {
     rec.gz_cdeg = (int16_t)lroundf(last_gz * 100.0f);
     rec.roll_cdeg = (int16_t)lroundf(roll * 5729.57795f);
     rec.pitch_cdeg = (int16_t)lroundf(pitch * 5729.57795f);
-    rec.gps_lat_e7 = (int32_t)llround(gpsLatDeg * 1e7);
-    rec.gps_lon_e7 = (int32_t)llround(gpsLonDeg * 1e7);
-    rec.gps_alt_cm = (int32_t)lroundf(gpsAltM * 100.0f);
-    rec.gps_rel_alt_cm = haveGpsBaseAlt ? (int32_t)lroundf(gpsRelAltM * 100.0f) : INT32_MIN;
-    rec.baro_gps_delta_cm = isfinite(baroGpsDeltaM) ? (int32_t)lroundf(baroGpsDeltaM * 100.0f) : INT32_MIN;
-    rec.gps_speed_cms = (int16_t)lroundf(gpsSpeedMps * 100.0f);
-    rec.batt_mv = (uint16_t)lroundf(rocketBattV * 1000.0f);
-    rec.diag_flags = diagFlags;
-    rec.mx_centiuT = (int16_t)lroundf(last_mx * 100.0f);
-    rec.my_centiuT = (int16_t)lroundf(last_my * 100.0f);
-    rec.mz_centiuT = (int16_t)lroundf(last_mz * 100.0f);
     rec.yaw_cdeg = (int16_t)lroundf(yaw * 5729.57795f);
     rec.state = (uint8_t)flightState;
-    rec.gps_fix_type = gpsFixType;
-    rec.gps_sats = gpsSats;
-    rec.battery_pack = (uint8_t)batteryPack;
-    if (nandLogFile.write((const uint8_t *)&rec, sizeof(rec)) != sizeof(rec)) {
+    rec.flags = 0;
+    if (!appendNandRecord(&rec, sizeof(rec))) {
       nandLogOk = false;
-      nandLogFile.close();
-    } else {
-      nandRecordCount++;
+      if (nandLogFile) nandLogFile.close();
     }
   }
 #endif
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
 
+static void flushLogsIfDue() {
+  const uint32_t nowMs = millis();
   if ((nowMs - lastLogFlushMs) >= LOG_FLUSH_MS) {
     lastLogFlushMs = nowMs;
     if (sdLogFile) sdLogFile.flush();
 #if HAS_LITTLEFS_QPINAND
     if (nandLogFile) {
+      flushNandLogCache();
       rewriteNandLogHeader(false, NAND_CLOSE_NONE);
       nandLogFile.flush();
     }
@@ -1179,6 +1477,10 @@ static ServiceRequest loadServiceRequest() {
       req.exportToSd = parseBoolValue(value, req.exportToSd);
     } else if (key == "erase_nand_after_export" || key == "clean_nand") {
       req.eraseNandAfterExport = parseBoolValue(value, req.eraseNandAfterExport);
+    } else if (key == "export_latest_only" || key == "latest_only") {
+      req.exportLatestOnly = parseBoolValue(value, req.exportLatestOnly);
+    } else if (key == "export_imu" || key == "copy_imu") {
+      req.exportImu = parseBoolValue(value, req.exportImu);
     } else if (key == "require_nand_ok") {
       req.requireNandOk = parseBoolValue(value, req.requireNandOk);
     } else if (key == "require_sd_ok") {
@@ -1204,130 +1506,451 @@ static bool isPlausibleNandRecordV3(const NandFlightRecordV3 &rec) {
   return true;
 }
 
-static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t operationId) {
-  File src = qspiNand.open(nandName, FILE_READ);
-  if (!src) return NAND_EXPORT_FAILED;
+static void metadataFromHeaderV3(const NandLogHeaderV3 &header, NandLogMetadata &meta) {
+  meta = {};
+  meta.header_version = header.version;
+  meta.header_size = header.header_size;
+  meta.record_size = header.record_size;
+  meta.flags = header.flags;
+  meta.flight_index = header.flight_index;
+  meta.boot_ms = header.boot_ms;
+  meta.open_ms = header.open_ms;
+  meta.close_ms = header.close_ms;
+  meta.record_count = header.record_count;
+  meta.final_state = header.final_state;
+  meta.close_reason = header.close_reason;
+  copyFixedString(meta.firmware_version, sizeof(meta.firmware_version), header.firmware_version);
+  copyFixedString(meta.rocket_name, sizeof(meta.rocket_name), header.rocket_name);
+  meta.imu_hz = header.imu_hz;
+  meta.baro_hz = header.baro_hz;
+  meta.nand_log_hz = header.nand_log_hz;
+  meta.sd_log_hz = header.sd_log_hz;
+  meta.flight_tx_hz_x10 = header.flight_tx_hz_x10;
+  meta.nav_tx_hz_x10 = header.nav_tx_hz_x10;
+  meta.status_tx_hz_x10 = header.status_tx_hz_x10;
+  meta.identity_tx_hz_x10 = header.identity_tx_hz_x10;
+  meta.recovery_flight_tx_hz_x10 = header.recovery_flight_tx_hz_x10;
+  meta.recovery_nav_tx_hz_x10 = header.recovery_nav_tx_hz_x10;
+  meta.recovery_status_tx_hz_x10 = header.recovery_status_tx_hz_x10;
+  meta.recovery_nand_log_hz_x10 = header.recovery_nand_log_hz_x10;
+  meta.recovery_sd_log_hz_x10 = header.recovery_sd_log_hz_x10;
+  meta.gyro_range_dps = header.gyro_range_dps;
+  meta.accel_range_g = header.accel_range_g;
+  meta.mag_range_gauss = header.mag_range_gauss;
+  meta.estimator_version = header.estimator_version;
+  meta.record_format = header.record_format;
+}
 
-  NandLogHeaderV2 header = {};
+static void writeNandExportMetadata(File &dst, const NandLogMetadata &meta) {
+  dst.print("# nand_header_version=");
+  dst.println(meta.header_version);
+  dst.print("# firmware_version=");
+  dst.println(meta.firmware_version);
+  dst.print("# rocket_name=");
+  dst.println(meta.rocket_name);
+  dst.print("# flight_index=");
+  dst.println((unsigned long)meta.flight_index);
+  dst.print("# record_format=");
+  dst.println(meta.record_format);
+  dst.print("# record_size=");
+  dst.println(meta.record_size);
+  dst.print("# record_count=");
+  dst.println((unsigned long)meta.record_count);
+  dst.print("# finalized=");
+  dst.println((meta.flags & NAND_LOG_FLAG_FINALIZED) ? 1 : 0);
+  dst.print("# final_state=");
+  dst.println(meta.final_state);
+  dst.print("# close_reason=");
+  dst.println(meta.close_reason);
+  dst.print("# boot_ms=");
+  dst.println((unsigned long)meta.boot_ms);
+  dst.print("# open_ms=");
+  dst.println((unsigned long)meta.open_ms);
+  dst.print("# close_ms=");
+  dst.println((unsigned long)meta.close_ms);
+  if (meta.imu_hz) {
+    dst.print("# imu_hz=");
+    dst.println(meta.imu_hz);
+    dst.print("# baro_hz=");
+    dst.println(meta.baro_hz);
+    dst.print("# nand_log_hz=");
+    dst.println(meta.nand_log_hz);
+    dst.print("# sd_log_hz=");
+    dst.println(meta.sd_log_hz);
+    dst.print("# flight_tx_hz_x10=");
+    dst.println(meta.flight_tx_hz_x10);
+    dst.print("# nav_tx_hz_x10=");
+    dst.println(meta.nav_tx_hz_x10);
+    dst.print("# status_tx_hz_x10=");
+    dst.println(meta.status_tx_hz_x10);
+    dst.print("# identity_tx_hz_x10=");
+    dst.println(meta.identity_tx_hz_x10);
+    dst.print("# recovery_flight_tx_hz_x10=");
+    dst.println(meta.recovery_flight_tx_hz_x10);
+    dst.print("# recovery_nav_tx_hz_x10=");
+    dst.println(meta.recovery_nav_tx_hz_x10);
+    dst.print("# recovery_status_tx_hz_x10=");
+    dst.println(meta.recovery_status_tx_hz_x10);
+    dst.print("# recovery_nand_log_hz_x10=");
+    dst.println(meta.recovery_nand_log_hz_x10);
+    dst.print("# recovery_sd_log_hz_x10=");
+    dst.println(meta.recovery_sd_log_hz_x10);
+    dst.print("# accel_range_g=");
+    dst.println(meta.accel_range_g);
+    dst.print("# gyro_range_dps=");
+    dst.println(meta.gyro_range_dps);
+    dst.print("# mag_range_gauss=");
+    dst.println(meta.mag_range_gauss);
+    dst.print("# estimator_version=");
+    dst.println(meta.estimator_version);
+  }
+}
+
+static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t operationId, bool exportImu) {
+  if (SERIAL_DEBUG_LEVEL >= 1) {
+    Serial.print("NAND export: open ");
+    Serial.println(nandName);
+  }
+  File src = qspiNand.open(nandName, FILE_READ);
+  if (!src) {
+    if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: open failed");
+    return NAND_EXPORT_FAILED;
+  }
+
+  NandLogHeaderV3 header = {};
+  NandLogMetadata meta = {};
   if (src.read((uint8_t *)&header, sizeof(header)) != (int)sizeof(header)) {
+    if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: header short read, skipped");
     src.close();
     return NAND_EXPORT_SKIPPED;
   }
   if (memcmp(header.magic, "RV10NLG", 8) != 0 ||
-      header.version != 2 ||
-      header.header_size != sizeof(header) ||
-      header.record_size != sizeof(NandFlightRecordV3)) {
+      header.version != 4 ||
+      header.header_size != sizeof(NandLogHeaderV3) ||
+      header.record_format != NAND_RECORD_FORMAT_V4) {
+    if (SERIAL_DEBUG_LEVEL >= 1) {
+      Serial.print("NAND export: unsupported header version=");
+      Serial.print(header.version);
+      Serial.print(" header_size=");
+      Serial.print(header.header_size);
+      Serial.print(" record_format=");
+      Serial.println(header.record_format);
+    }
     src.close();
     return NAND_EXPORT_SKIPPED;
+  }
+  metadataFromHeaderV3(header, meta);
+  if (SERIAL_DEBUG_LEVEL >= 1) {
+    Serial.print("NAND export: header ok flight=");
+    Serial.print((unsigned long)meta.flight_index);
+    Serial.print(" records=");
+    Serial.print((unsigned long)meta.record_count);
+    Serial.print(" size=");
+    Serial.print((unsigned long)src.size());
+    Serial.print(" finalized=");
+    Serial.println((meta.flags & NAND_LOG_FLAG_FINALIZED) ? 1 : 0);
   }
 
-  const uint16_t recordSize = sizeof(NandFlightRecordV3);
-  if (src.size() < (uint64_t)header.header_size + recordSize) {
+  if (src.size() < (uint64_t)meta.header_size + 2) {
+    if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: no payload, skipped");
     src.close();
     return NAND_EXPORT_SKIPPED;
   }
-  if (!src.seek(header.header_size)) {
-    src.close();
-    return NAND_EXPORT_FAILED;
-  }
-
-  NandFlightRecordV3 firstRec = {};
-  if (src.read((uint8_t *)&firstRec, sizeof(firstRec)) != (int)sizeof(firstRec)) {
-    src.close();
-    return NAND_EXPORT_FAILED;
-  }
-  if (!isPlausibleNandRecordV3(firstRec)) {
+  const uint64_t fileSize = src.size();
+  const uint64_t payloadBytes = fileSize - meta.header_size;
+  const uint32_t maxPossibleRecords = (uint32_t)(payloadBytes / 2);
+  if (meta.record_count == 0 || meta.record_count > maxPossibleRecords) {
+    if (SERIAL_DEBUG_LEVEL >= 1) {
+      Serial.print("NAND export: impossible record_count=");
+      Serial.print((unsigned long)meta.record_count);
+      Serial.print(" max_possible=");
+      Serial.println((unsigned long)maxPossibleRecords);
+    }
     src.close();
     return NAND_EXPORT_SKIPPED;
   }
-  if (!src.seek(header.header_size)) {
+  if (!src.seek(meta.header_size)) {
+    if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: seek payload failed");
     src.close();
     return NAND_EXPORT_FAILED;
   }
 
   char csvName[48];
   snprintf(csvName, sizeof(csvName), "rocket_nand_%04lu_op%lu.csv",
-           (unsigned long)header.flight_index, (unsigned long)operationId);
+           (unsigned long)meta.flight_index, (unsigned long)operationId);
+  char imuCsvName[52];
+  snprintf(imuCsvName, sizeof(imuCsvName), "rocket_nand_%04lu_op%lu_imu.csv",
+           (unsigned long)meta.flight_index, (unsigned long)operationId);
+  SD.remove(csvName);
+  SD.remove(imuCsvName);
   File dst = SD.open(csvName, FILE_WRITE);
   if (!dst) {
+    if (SERIAL_DEBUG_LEVEL >= 1) {
+      Serial.print("NAND export: open csv failed ");
+      Serial.println(csvName);
+    }
     src.close();
     return NAND_EXPORT_FAILED;
   }
-
-  dst.println("ms,state,flags,health,diag_flags,alt_m,rel_alt_m,vel_mps,temp_c,pres_pa,ax,ay,az,gx,gy,gz,mx,my,mz,roll,pitch,yaw,gps_fix,sats,lat,lon,gps_alt_m,gps_rel_alt_m,baro_gps_delta_m,gps_speed_mps,batt_v,pack");
-  while (src.available() >= (int)recordSize) {
-    updateStatusLed();
-    NandFlightRecordV3 rec = {};
-    if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+  File imuDst;
+  if (exportImu) {
+    imuDst = SD.open(imuCsvName, FILE_WRITE);
+    if (!imuDst) {
+      if (SERIAL_DEBUG_LEVEL >= 1) {
+        Serial.print("NAND export: open imu csv failed ");
+        Serial.println(imuCsvName);
+      }
       dst.close();
       src.close();
       return NAND_EXPORT_FAILED;
     }
-    const float gpsRelAlt = (rec.gps_rel_alt_cm == INT32_MIN) ? NAN : rec.gps_rel_alt_cm / 100.0f;
-    const float baroGpsDelta = (rec.baro_gps_delta_cm == INT32_MIN) ? NAN : rec.baro_gps_delta_cm / 100.0f;
-    const float recMx = rec.mx_centiuT / 100.0f;
-    const float recMy = rec.my_centiuT / 100.0f;
-    const float recMz = rec.mz_centiuT / 100.0f;
-    const float recYaw = rec.yaw_cdeg / 100.0f;
-    char line[512];
-    snprintf(line, sizeof(line),
-             "%lu,%u,%u,%u,%u,"
-             "%.2f,%.2f,%.2f,%.2f,%.1f,"
-             "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
-             "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
-             "%u,%u,%.7f,%.7f,%.2f,%.2f,%.2f,%.2f,%.3f,%u",
-             (unsigned long)rec.ms,
-             (unsigned int)rec.state,
-             (unsigned int)rec.flight_flags,
-             (unsigned int)rec.health_flags,
-             (unsigned int)rec.diag_flags,
-             rec.alt_cm / 100.0f,
-             rec.rel_alt_cm / 100.0f,
-             rec.vel_cms / 100.0f,
-             rec.temp_centi_c / 100.0f,
-             rec.pressure_pa_x10 / 10.0f,
-             rec.ax_cms2 / 100.0f,
-             rec.ay_cms2 / 100.0f,
-             rec.az_cms2 / 100.0f,
-             rec.gx_cdeg / 100.0f,
-             rec.gy_cdeg / 100.0f,
-             rec.gz_cdeg / 100.0f,
-             recMx,
-             recMy,
-             recMz,
-             rec.roll_cdeg / 100.0f,
-             rec.pitch_cdeg / 100.0f,
-             recYaw,
-             (unsigned int)rec.gps_fix_type,
-             (unsigned int)rec.gps_sats,
-             rec.gps_lat_e7 / 1e7,
-             rec.gps_lon_e7 / 1e7,
-             rec.gps_alt_cm / 100.0f,
-             gpsRelAlt,
-             baroGpsDelta,
-             rec.gps_speed_cms / 100.0f,
-             rec.batt_mv / 1000.0f,
-             (unsigned int)rec.battery_pack);
-    if (!dst.println(line)) {
-      dst.close();
+  }
+  writeNandExportMetadata(dst, meta);
+  dst.println("ms,state,flags,health,diag_flags,alt_m,rel_alt_m,vel_mps,temp_c,pres_pa,ax,ay,az,gx,gy,gz,mx,my,mz,roll,pitch,yaw,gps_fix,sats,lat,lon,gps_alt_m,gps_rel_alt_m,baro_gps_delta_m,gps_speed_mps,batt_v,pack");
+  if (imuDst) {
+    writeNandExportMetadata(imuDst, meta);
+    imuDst.println("ms,seq,state,ax,ay,az,gx,gy,gz,roll,pitch,yaw");
+  }
+  dst.flush();
+  if (imuDst) imuDst.flush();
+  bool wroteFull = false;
+  bool wroteImu = false;
+
+  uint64_t offset = meta.header_size;
+  uint32_t recordsRead = 0;
+  uint32_t fullRows = 0;
+  uint32_t imuRows = 0;
+  uint32_t badTypeRows = 0;
+  uint32_t implausibleRows = 0;
+  while (offset + 2 <= fileSize && recordsRead < meta.record_count) {
+    updateStatusLed();
+    if (!src.seek(offset)) {
+      if (SERIAL_DEBUG_LEVEL >= 1) {
+        Serial.print("NAND export: seek record failed offset=");
+        Serial.println((unsigned long)offset);
+      }
+      if (dst) dst.close();
+      if (imuDst) imuDst.close();
       src.close();
       return NAND_EXPORT_FAILED;
+    }
+    uint8_t type = 0;
+    uint8_t size = 0;
+    if (src.read(&type, 1) != 1 || src.read(&size, 1) != 1) {
+      if (SERIAL_DEBUG_LEVEL >= 1) {
+        Serial.print("NAND export: record header read failed offset=");
+        Serial.println((unsigned long)offset);
+      }
+      if (dst) dst.close();
+      if (imuDst) imuDst.close();
+      src.close();
+      return NAND_EXPORT_FAILED;
+    }
+    if (size < 2 || offset + size > fileSize) {
+      if (SERIAL_DEBUG_LEVEL >= 1) {
+        Serial.print("NAND export: bad record size type=");
+        Serial.print(type);
+        Serial.print(" size=");
+        Serial.print(size);
+        Serial.print(" offset=");
+        Serial.println((unsigned long)offset);
+      }
+      break;
+    }
+    if (!src.seek(offset)) {
+      if (SERIAL_DEBUG_LEVEL >= 1) {
+        Serial.print("NAND export: seek record body failed offset=");
+        Serial.println((unsigned long)offset);
+      }
+      if (dst) dst.close();
+      if (imuDst) imuDst.close();
+      src.close();
+      return NAND_EXPORT_FAILED;
+    }
+
+    if (type == NAND_RECORD_FULL_STATE_V4 && size == sizeof(NandFullStateRecordV4)) {
+      NandFullStateRecordV4 wrapped = {};
+      if (src.read((uint8_t *)&wrapped, sizeof(wrapped)) != (int)sizeof(wrapped)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: full record read failed");
+        if (dst) dst.close();
+        if (imuDst) imuDst.close();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      const NandFlightRecordV3 &rec = wrapped.data;
+      if (!isPlausibleNandRecordV3(rec)) {
+        implausibleRows++;
+        offset += size;
+        recordsRead++;
+        continue;
+      }
+      const float gpsRelAlt = (rec.gps_rel_alt_cm == INT32_MIN) ? NAN : rec.gps_rel_alt_cm / 100.0f;
+      const float baroGpsDelta = (rec.baro_gps_delta_cm == INT32_MIN) ? NAN : rec.baro_gps_delta_cm / 100.0f;
+      char line[512];
+      snprintf(line, sizeof(line),
+               "%lu,%u,%u,%u,%u,"
+               "%.2f,%.2f,%.2f,%.2f,%.1f,"
+               "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
+               "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
+               "%u,%u,%.7f,%.7f,%.2f,%.2f,%.2f,%.2f,%.3f,%u",
+               (unsigned long)rec.ms,
+               (unsigned int)rec.state,
+               (unsigned int)rec.flight_flags,
+               (unsigned int)rec.health_flags,
+               (unsigned int)rec.diag_flags,
+               rec.alt_cm / 100.0f,
+               rec.rel_alt_cm / 100.0f,
+               rec.vel_cms / 100.0f,
+               rec.temp_centi_c / 100.0f,
+               rec.pressure_pa_x10 / 10.0f,
+               rec.ax_cms2 / 100.0f,
+               rec.ay_cms2 / 100.0f,
+               rec.az_cms2 / 100.0f,
+               rec.gx_cdeg / 100.0f,
+               rec.gy_cdeg / 100.0f,
+               rec.gz_cdeg / 100.0f,
+               rec.mx_centiuT / 100.0f,
+               rec.my_centiuT / 100.0f,
+               rec.mz_centiuT / 100.0f,
+               rec.roll_cdeg / 100.0f,
+               rec.pitch_cdeg / 100.0f,
+               rec.yaw_cdeg / 100.0f,
+               (unsigned int)rec.gps_fix_type,
+               (unsigned int)rec.gps_sats,
+               rec.gps_lat_e7 / 1e7,
+               rec.gps_lon_e7 / 1e7,
+               rec.gps_alt_cm / 100.0f,
+               gpsRelAlt,
+               baroGpsDelta,
+               rec.gps_speed_cms / 100.0f,
+               rec.batt_mv / 1000.0f,
+               (unsigned int)rec.battery_pack);
+      if (!dst.println(line)) {
+        dst.close();
+        if (imuDst) imuDst.close();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      wroteFull = true;
+      fullRows++;
+    } else if (type == NAND_RECORD_IMU_V4 && size == sizeof(NandImuRecordV4)) {
+      NandImuRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: imu record read failed");
+        if (dst) dst.close();
+        if (imuDst) imuDst.close();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (imuDst) {
+        char line[192];
+        snprintf(line, sizeof(line),
+                 "%lu,%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 (unsigned int)rec.state,
+                 rec.ax_cms2 / 100.0f,
+                 rec.ay_cms2 / 100.0f,
+                 rec.az_cms2 / 100.0f,
+                 rec.gx_cdeg / 100.0f,
+                 rec.gy_cdeg / 100.0f,
+                 rec.gz_cdeg / 100.0f,
+                 rec.roll_cdeg / 100.0f,
+                 rec.pitch_cdeg / 100.0f,
+                 rec.yaw_cdeg / 100.0f);
+        if (!imuDst.println(line)) {
+          if (dst) dst.close();
+          imuDst.close();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      if (exportImu) wroteImu = true;
+      imuRows++;
+    } else {
+      badTypeRows++;
+      if (SERIAL_DEBUG_LEVEL >= 2 && badTypeRows <= 8) {
+        Serial.print("NAND export: unknown record type=");
+        Serial.print(type);
+        Serial.print(" size=");
+        Serial.print(size);
+        Serial.print(" offset=");
+        Serial.println((unsigned long)offset);
+      }
+    }
+    offset += size;
+    recordsRead++;
+    if (SERIAL_DEBUG_LEVEL >= 1 && (recordsRead % 1000u) == 0) {
+      Serial.print("NAND export: progress records=");
+      Serial.print((unsigned long)recordsRead);
+      Serial.print("/");
+      Serial.print((unsigned long)meta.record_count);
+      Serial.print(" full=");
+      Serial.print((unsigned long)fullRows);
+      Serial.print(" imu=");
+      Serial.print((unsigned long)imuRows);
+      Serial.print(" bad=");
+      Serial.print((unsigned long)badTypeRows);
+      Serial.print(" implausible=");
+      Serial.println((unsigned long)implausibleRows);
     }
   }
 
   dst.flush();
   dst.close();
+  if (imuDst) {
+    imuDst.flush();
+    imuDst.close();
+  }
   src.close();
+  if (SERIAL_DEBUG_LEVEL >= 1) {
+    Serial.print("NAND export: done records=");
+    Serial.print((unsigned long)recordsRead);
+    Serial.print(" full=");
+    Serial.print((unsigned long)fullRows);
+    Serial.print(" imu=");
+    Serial.print((unsigned long)imuRows);
+    Serial.print(" bad=");
+    Serial.print((unsigned long)badTypeRows);
+    Serial.print(" implausible=");
+    Serial.println((unsigned long)implausibleRows);
+  }
+  if (!wroteFull && !wroteImu) {
+    if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: no rows written, skipped");
+    return NAND_EXPORT_SKIPPED;
+  }
   return NAND_EXPORT_EXPORTED;
 }
 
-static bool exportAllNandLogsToSd(uint32_t operationId, uint32_t &exportedCount,
+static bool exportAllNandLogsToSd(uint32_t operationId, bool latestOnly, bool exportImu, uint32_t &exportedCount,
                                   uint32_t &skippedCount, uint32_t &failedCount) {
   exportedCount = 0;
   skippedCount = 0;
   failedCount = 0;
   File root = qspiNand.open("/");
   if (!root) return false;
+
+  int latestIndex = -1;
+  if (latestOnly) {
+    while (true) {
+      File f = root.openNextFile();
+      if (!f) break;
+      if (!f.isDirectory()) {
+        const char *name = f.name();
+        int idx = extractPrefixedIndex(name, "rocket_flt");
+        if (idx < 0) idx = extractPrefixedIndex(name, "flt");
+        if (idx > latestIndex && strstr(name, ".bin")) latestIndex = idx;
+      }
+      f.close();
+    }
+    root.close();
+    root = qspiNand.open("/");
+    if (!root) return false;
+    if (SERIAL_DEBUG_LEVEL >= 1) {
+      Serial.print("NAND export all: latest_only index=");
+      Serial.println(latestIndex);
+    }
+  }
 
   bool allOk = true;
   while (true) {
@@ -1338,18 +1961,30 @@ static bool exportAllNandLogsToSd(uint32_t operationId, uint32_t &exportedCount,
       int idx = extractPrefixedIndex(name, "rocket_flt");
       if (idx < 0) idx = extractPrefixedIndex(name, "flt");
       if (idx > 0 && strstr(name, ".bin")) {
+        if (latestOnly && idx != latestIndex) {
+          f.close();
+          skippedCount++;
+          continue;
+        }
         char path[32];
         strncpy(path, name, sizeof(path) - 1);
         path[sizeof(path) - 1] = '\0';
         f.close();
-        NandExportResult result = exportOneNandLogToSd(path, operationId);
+        if (SERIAL_DEBUG_LEVEL >= 1) {
+          Serial.print("NAND export all: file ");
+          Serial.println(path);
+        }
+        NandExportResult result = exportOneNandLogToSd(path, operationId, exportImu);
         if (result == NAND_EXPORT_EXPORTED) {
           exportedCount++;
+          if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export all: result exported");
         } else if (result == NAND_EXPORT_SKIPPED) {
           skippedCount++;
+          if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export all: result skipped");
         } else {
           failedCount++;
           allOk = false;
+          if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export all: result failed");
         }
         continue;
       }
@@ -1357,6 +1992,14 @@ static bool exportAllNandLogsToSd(uint32_t operationId, uint32_t &exportedCount,
     f.close();
   }
   root.close();
+  if (SERIAL_DEBUG_LEVEL >= 1) {
+    Serial.print("NAND export all: complete exported=");
+    Serial.print((unsigned long)exportedCount);
+    Serial.print(" skipped=");
+    Serial.print((unsigned long)skippedCount);
+    Serial.print(" failed=");
+    Serial.println((unsigned long)failedCount);
+  }
   return allOk;
 }
 
@@ -1378,10 +2021,15 @@ static bool eraseAllNandLogs(uint32_t &removedCount) {
         strncpy(path, name, sizeof(path) - 1);
         path[sizeof(path) - 1] = '\0';
         f.close();
+        if (SERIAL_DEBUG_LEVEL >= 1) {
+          Serial.print("NAND erase: remove ");
+          Serial.println(path);
+        }
         if (qspiNand.remove(path)) {
           removedCount++;
         } else {
           allOk = false;
+          if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND erase: remove failed");
         }
         continue;
       }
@@ -1389,6 +2037,12 @@ static bool eraseAllNandLogs(uint32_t &removedCount) {
     f.close();
   }
   root.close();
+  if (SERIAL_DEBUG_LEVEL >= 1) {
+    Serial.print("NAND erase: complete removed=");
+    Serial.print((unsigned long)removedCount);
+    Serial.print(" ok=");
+    Serial.println(allOk ? 1 : 0);
+  }
   return allOk;
 }
 #endif
@@ -1408,6 +2062,10 @@ static void writeServiceResult(const ServiceRequest &req, bool exportDone, uint3
   f.print(sdOk ? "1" : "0");
   f.print("\nexport_requested=");
   f.print(req.exportToSd ? "1" : "0");
+  f.print("\nexport_latest_only=");
+  f.print(req.exportLatestOnly ? "1" : "0");
+  f.print("\nexport_imu=");
+  f.print(req.exportImu ? "1" : "0");
   f.print("\nexport_done=");
   f.print(exportDone ? "1" : "0");
   f.print("\nexport_count=");
@@ -1450,20 +2108,48 @@ static void processServiceModeIfRequested() {
 
   if (req.requireSdOk && !sdOk) statusOk = false;
   if (req.requireNandOk && !nandOk) statusOk = false;
+  if (SERIAL_DEBUG_LEVEL >= 1) {
+    Serial.print("Service checks: sdOk=");
+    Serial.print(sdOk ? 1 : 0);
+    Serial.print(" nandOk=");
+    Serial.print(nandOk ? 1 : 0);
+    Serial.print(" statusOk=");
+    Serial.println(statusOk ? 1 : 0);
+  }
 
 #if HAS_LITTLEFS_QPINAND
   if (statusOk && req.exportToSd) {
+    if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("Service export: finalize active logs");
     finalizeLogFiles(NAND_CLOSE_SERVICE);
-    exportDone = exportAllNandLogsToSd(req.operationId, exportCount, exportSkipped, exportFailed);
+    if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("Service export: start");
+    exportDone = exportAllNandLogsToSd(req.operationId, req.exportLatestOnly, req.exportImu,
+                                       exportCount, exportSkipped, exportFailed);
     statusOk = statusOk && exportDone;
+    if (SERIAL_DEBUG_LEVEL >= 1) {
+      Serial.print("Service export: done=");
+      Serial.print(exportDone ? 1 : 0);
+      Serial.print(" exported=");
+      Serial.print((unsigned long)exportCount);
+      Serial.print(" skipped=");
+      Serial.print((unsigned long)exportSkipped);
+      Serial.print(" failed=");
+      Serial.println((unsigned long)exportFailed);
+    }
   }
 
   if (statusOk && req.eraseNandAfterExport) {
     if (!req.exportToSd || !exportDone) {
       statusOk = false;
     } else {
+      if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("Service erase: start");
       eraseDone = eraseAllNandLogs(eraseCount);
       statusOk = statusOk && eraseDone;
+      if (SERIAL_DEBUG_LEVEL >= 1) {
+        Serial.print("Service erase: done=");
+        Serial.print(eraseDone ? 1 : 0);
+        Serial.print(" count=");
+        Serial.println((unsigned long)eraseCount);
+      }
     }
   }
 #else
@@ -1475,6 +2161,10 @@ static void processServiceModeIfRequested() {
 
   writeServiceResult(req, exportDone, exportCount, exportSkipped, exportFailed,
                      eraseDone, eraseCount, statusOk ? "success" : "failed");
+  if (SERIAL_DEBUG_LEVEL >= 1) {
+    Serial.print("Service result written status=");
+    Serial.println(statusOk ? "success" : "failed");
+  }
   if (statusOk) {
     SD.remove("/nand_ops.txt");
     serviceModeSuccess = true;
@@ -1549,8 +2239,8 @@ static void setupImu() {
   }
 
   if (lsm.begin()) {
-    lsm.setupAccel(Adafruit_LSM9DS1::LSM9DS1_ACCELRANGE_4G);
-    lsm.setupGyro(Adafruit_LSM9DS1::LSM9DS1_GYROSCALE_500DPS);
+    lsm.setupAccel(Adafruit_LSM9DS1::LSM9DS1_ACCELRANGE_16G);
+    lsm.setupGyro(Adafruit_LSM9DS1::LSM9DS1_GYROSCALE_2000DPS);
     lsm.setupMag(Adafruit_LSM9DS1::LSM9DS1_MAGGAIN_4GAUSS);
     imuOk = true;
     if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("LSM9DS1: begin OK");
@@ -1790,17 +2480,27 @@ static void updateImu(float dt) {
   float ax_g = last_ax / 9.80665f;
   float ay_g = last_ay / 9.80665f;
   float az_g = last_az / 9.80665f;
+  const float accMagG = sqrtf(ax_g * ax_g + ay_g * ay_g + az_g * az_g);
+  const bool accelCorrectionOk = accMagG >= IMU_ACCEL_CORRECT_MIN_G &&
+                                 accMagG <= IMU_ACCEL_CORRECT_MAX_G;
   float rollAcc = atan2f(ay_g, az_g);
   float pitchAcc = atan2f(-ax_g, sqrtf(ay_g * ay_g + az_g * az_g));
+  const bool initializingEstimate = !haveImuEstimate;
 
-  if (!haveImuEstimate) {
+  if (initializingEstimate) {
     roll = rollAcc;
     pitch = pitchAcc;
     haveImuEstimate = true;
   } else {
-    const float alpha = 0.96f;
-    roll = alpha * (roll + (last_gx * 0.017453293f) * dt) + (1.0f - alpha) * rollAcc;
-    pitch = alpha * (pitch + (last_gy * 0.017453293f) * dt) + (1.0f - alpha) * pitchAcc;
+    const float rollGyro = wrapPi(roll + (last_gx * 0.017453293f) * dt);
+    const float pitchGyro = wrapPi(pitch + (last_gy * 0.017453293f) * dt);
+    if (accelCorrectionOk) {
+      roll = wrapPi(rollGyro + (1.0f - IMU_GYRO_ALPHA) * angleDelta(rollGyro, rollAcc));
+      pitch = wrapPi(pitchGyro + (1.0f - IMU_GYRO_ALPHA) * angleDelta(pitchGyro, pitchAcc));
+    } else {
+      roll = rollGyro;
+      pitch = pitchGyro;
+    }
   }
 
   const float cp = cosf(pitch);
@@ -1809,7 +2509,15 @@ static void updateImu(float dt) {
   const float sr = sinf(roll);
   const float magX = last_mx * cp + last_mz * sp;
   const float magY = last_mx * sr * sp + last_my * cr - last_mz * sr * cp;
-  yaw = atan2f(-magY, magX);
+  const float yawMag = atan2f(-magY, magX);
+  if (initializingEstimate) {
+    yaw = yawMag;
+  } else {
+    yaw = wrapPi(yaw + (last_gz * 0.017453293f) * dt);
+    if (accelCorrectionOk) {
+      yaw = wrapPi(yaw + (1.0f - IMU_MAG_YAW_ALPHA) * angleDelta(yaw, yawMag));
+    }
+  }
   if (yaw < 0.0f) yaw += 2.0f * PI;
 
   lastImuSampleMs = millis();
@@ -1819,10 +2527,15 @@ static void updateImu(float dt) {
 }
 
 static void updateBaroAndState(float dt) {
+  (void)dt;
   float tempC = 0.0f;
   float pressurePa = 0.0f;
   float altM = 0.0f;
-  if (!ms5607.read(tempC, pressurePa, altM)) {
+  BaroReadStatus status = ms5607.update(tempC, pressurePa, altM);
+  if (status == BARO_READ_WAITING) {
+    return;
+  }
+  if (status == BARO_READ_ERROR) {
     baroOk = false;
     return;
   }
@@ -1834,6 +2547,8 @@ static void updateBaroAndState(float dt) {
     haveAlt = true;
     filtAlt = altM;
     lastAltRaw = altM;
+    velRefAltM = altM;
+    velRefMs = nowMs;
     filtTempC = tempC;
     filtPressurePa = pressurePa;
     velZ = 0.0f;
@@ -1844,17 +2559,27 @@ static void updateBaroAndState(float dt) {
     return;
   }
 
-  float rawVel = (altM - lastAltRaw) / dt;
-  if (fabsf(rawVel) > BARO_MAX_RAW_VEL_MPS) {
-    return;
-  }
-  lastAltRaw = altM;
-
   filtAlt = 0.90f * filtAlt + 0.10f * altM;
   filtTempC = 0.90f * filtTempC + 0.10f * tempC;
   filtPressurePa = 0.90f * filtPressurePa + 0.10f * pressurePa;
 
-  velZ = 0.80f * velZ + 0.20f * rawVel;
+  if (velRefMs == 0) {
+    velRefAltM = altM;
+    velRefMs = nowMs;
+  }
+  const uint32_t velWindowMs = nowMs - velRefMs;
+  if (velWindowMs >= BARO_VEL_WINDOW_MS) {
+    const float rawVel = (altM - velRefAltM) / (velWindowMs / 1000.0f);
+    if (fabsf(rawVel) > BARO_MAX_RAW_VEL_MPS) {
+      velRefAltM = altM;
+      velRefMs = nowMs;
+      return;
+    }
+    lastAltRaw = altM;
+    velRefAltM = altM;
+    velRefMs = nowMs;
+    velZ = 0.80f * velZ + 0.20f * rawVel;
+  }
 
   float relAlt = currentBaroRelAltM();
   updateGpsAltitudeReference();
@@ -2095,9 +2820,12 @@ static void telemetryTask() {
 }
 
 static void storageTask() {
-  static uint32_t lastLogMs = 0;
+  static uint32_t lastSdLogMs = 0;
+  static uint32_t lastNandLogMs = 0;
   const uint32_t nowMs = millis();
-  const uint32_t logPeriodMs = (flightState == FS_LANDED) ? RECOVERY_LOG_UPDATE_MS : LOG_UPDATE_MS;
+  const bool recoveryMode = (flightState == FS_LANDED);
+  const uint32_t sdLogPeriodMs = recoveryMode ? RECOVERY_SD_LOG_UPDATE_MS : SD_LOG_UPDATE_MS;
+  const uint32_t nandLogPeriodMs = recoveryMode ? RECOVERY_NAND_LOG_UPDATE_MS : NAND_LOG_UPDATE_MS;
 
   if (flightState != lastFlightState) {
     if (flightState == FS_ABORT) {
@@ -2106,9 +2834,15 @@ static void storageTask() {
     lastFlightState = flightState;
   }
 
-  if (taskDue(nowMs, lastLogMs, logPeriodMs)) {
-    logCsv();
+  if (taskDue(nowMs, lastNandLogMs, nandLogPeriodMs)) {
+    logNandBinary();
   }
+
+  if (taskDue(nowMs, lastSdLogMs, sdLogPeriodMs)) {
+    logSdCsv();
+  }
+
+  flushLogsIfDue();
 }
 
 static void serialDebugTask() {
@@ -2153,6 +2887,7 @@ void loop() {
   static uint32_t lastImuMs = 0;
   static uint32_t lastBaroMs = 0;
   static uint32_t lastBattMs = 0;
+  static uint32_t lastNandImuLogMs = 0;
   static uint32_t lastImuUs = micros();
 
   sampleGpsTask();
@@ -2169,11 +2904,14 @@ void loop() {
   if (taskDue(nowMs, lastImuMs, IMU_UPDATE_MS)) {
     lastImuUs = nowUs;
     sampleImuTask(dtImu);
+    if (taskDue(nowMs, lastNandImuLogMs, NAND_IMU_LOG_UPDATE_MS)) {
+      logNandImuBinary(nowMs);
+    }
   }
 
   if ((uint32_t)(nowMs - lastBaroMs) >= BARO_UPDATE_MS) {
     float dtBaro = (nowMs - lastBaroMs) / 1000.0f;
-    if (dtBaro <= 0.0f || dtBaro > 0.25f) dtBaro = 0.05f;
+    if (dtBaro <= 0.0f || dtBaro > 0.25f) dtBaro = BARO_UPDATE_MS / 1000.0f;
     lastBaroMs = nowMs;
     sampleBaroTask(dtBaro);
   }

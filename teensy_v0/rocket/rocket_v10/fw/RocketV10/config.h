@@ -2,6 +2,11 @@
 
 #include <Arduino.h>
 
+// Firmware identity
+#define ROCKET_FW_VERSION       "rv10.20260427c"
+#define NAND_RECORD_FORMAT_V4   4
+#define ATTITUDE_ESTIMATOR_V2   2
+
 // LoRa RFM95
 #define LORA_FREQUENCY_HZ   915E6
 #define LORA_CS_PIN         10
@@ -47,8 +52,10 @@
 #define MS5607_ADDR_1       0x77
 
 // Timing
-#define IMU_UPDATE_MS       10
-#define BARO_UPDATE_MS      50
+#define IMU_UPDATE_MS       5
+#define BARO_UPDATE_MS      20
+#define BARO_TEMP_UPDATE_MS 200
+#define MS5607_CONVERSION_US 10000
 #define BATT_UPDATE_MS      100
 #define FLIGHT_TX_MS        200
 #define NAV_TX_MS           1000
@@ -57,8 +64,11 @@
 #define RECOVERY_FLIGHT_TX_MS 1000
 #define RECOVERY_NAV_TX_MS    2000
 #define RECOVERY_STATUS_TX_MS 5000
-#define LOG_UPDATE_MS       200
-#define RECOVERY_LOG_UPDATE_MS 2000
+#define SD_LOG_UPDATE_MS       200
+#define NAND_LOG_UPDATE_MS     20
+#define NAND_IMU_LOG_UPDATE_MS 5
+#define RECOVERY_SD_LOG_UPDATE_MS 2000
+#define RECOVERY_NAND_LOG_UPDATE_MS 2000
 #define LOG_FLUSH_MS        1000
 #define STATUS_PRINT_MS     1000
 #define LED_UPDATE_MS       50
@@ -66,15 +76,29 @@
 // NAND log rotation:
 // Before opening a new NAND flight log, delete oldest /fltNNNN.bin files
 // until there is enough free space and the file count is below the cap.
-// One V3 record is 78 bytes. At 5 Hz that is about 1.4 MB/hour.
+// V4 writes 50 Hz full-state records plus 200 Hz compact IMU records.
+// This is roughly 34 MB/hour before filesystem overhead.
 #define NAND_ROTATE_ENABLE       1
 #define NAND_MIN_FREE_BYTES      (16UL * 1024UL * 1024UL)
 #define NAND_MAX_LOG_FILES       96
+#define NAND_LOG_CACHE_BYTES     4096
 
 // Sensor freshness windows
 #define BARO_STALE_MS       300
 #define IMU_STALE_MS        200
 #define GPS_STALE_MS        3000
+
+// Attitude estimator:
+// During boost the accelerometer is dominated by thrust, not gravity. Only use
+// accelerometer/magnetometer correction when measured acceleration is close to
+// 1g; otherwise coast on gyro integration.
+#define IMU_ACCEL_CORRECT_MIN_G 0.75f
+#define IMU_ACCEL_CORRECT_MAX_G 1.25f
+#define IMU_GYRO_ALPHA          0.98f
+#define IMU_MAG_YAW_ALPHA       0.995f
+#define IMU_ACCEL_RANGE_G       16
+#define IMU_GYRO_RANGE_DPS      2000
+#define IMU_MAG_RANGE_GAUSS     4
 
 // Flight-state confirmation thresholds
 #define LAUNCH_ACCEL_G            2.0f
@@ -85,6 +109,7 @@
 #define LAUNCH_PAD_SETTLE_MS      2500
 #define LAUNCH_TREND_MS           150
 #define LAUNCH_TREND_MIN_M        2.50f
+#define BARO_VEL_WINDOW_MS        120
 #define BARO_MAX_RAW_VEL_MPS      120.0f
 #define COAST_VEL_MPS             5.0f
 #define COAST_MIN_AFTER_LAUNCH_MS 750
@@ -113,7 +138,7 @@
 // 0 = disabled for flight
 // 1 = boot + basic status line
 // 2 = boot + verbose sensor/status line for bench debugging
-#define SERIAL_DEBUG_LEVEL  0
+#define SERIAL_DEBUG_LEVEL  2
 
 // Rocket identity
 #define DEFAULT_ROCKET_NAME   "shadow"
