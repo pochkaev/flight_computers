@@ -32,13 +32,13 @@ FLOAT_KEYS = {
     "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz",
     "rollDeg", "pitchDeg", "yawDeg", "hdop", "lat", "lon", "gpsAlt",
     "gpsRelAlt", "gpsBaseAlt", "baroGpsDelta", "gpsSpd", "battRawV",
-    "batt", "battPin",
+    "batt", "battPin", "rssi",
 }
 
 INT_KEYS = {
     "ms", "state", "flags", "gpsFix", "sats", "gpsChars", "gpsPass",
     "gpsFail", "gpsLocValid", "gpsAltValid", "gpsDateValid", "gpsTimeValid",
-    "gpsFixAgeMs", "battRaw", "health",
+    "gpsFixAgeMs", "battRaw", "health", "fix",
 }
 
 BOOL_KEYS = {
@@ -57,13 +57,16 @@ STATE_NAMES = {
     6: "ABORT",
 }
 
+STATE_IDS = {name: value for value, name in STATE_NAMES.items()}
+GROUND_PREFIXES = {"FLIGHT", "NAV", "STATUS"}
+
 
 def parse_dbg_line(line: str) -> dict | None:
     line = line.strip()
     if not line.startswith("dbg "):
         return None
 
-    data: dict[str, object] = {"raw": line, "hostTime": time.time()}
+    data: dict[str, object] = {"source": "rocket", "packetType": "dbg", "raw": line, "hostTime": time.time()}
     for key, value in re.findall(r"([A-Za-z][A-Za-z0-9_]*)=([^ ]+)", line):
         if value == "nan":
             parsed: object = None
@@ -87,6 +90,77 @@ def parse_dbg_line(line: str) -> dict | None:
     if isinstance(state, int):
         data["stateName"] = STATE_NAMES.get(state, str(state))
     return data
+
+
+def parse_ground_line(line: str) -> dict | None:
+    line = line.strip()
+    if " " not in line:
+        return None
+    prefix, payload = line.split(" ", 1)
+    if prefix not in GROUND_PREFIXES:
+        return None
+
+    host_time = time.time()
+    data: dict[str, object] = {
+        "source": "ground",
+        "packetType": prefix.lower(),
+        "raw": line,
+        "hostTime": host_time,
+        "ms": int(host_time * 1000),
+    }
+    for key, value in re.findall(r"([A-Za-z][A-Za-z0-9_]*)=([^ ]+)", payload):
+        if value == "nan":
+            parsed: object = None
+        elif key == "state" and not re.fullmatch(r"-?\d+(\.\d+)?", value):
+            parsed = value
+        elif key in BOOL_KEYS:
+            parsed = value == "1"
+        elif key in INT_KEYS:
+            try:
+                parsed = int(float(value))
+            except ValueError:
+                parsed = value
+        elif key in FLOAT_KEYS:
+            try:
+                parsed = float(value)
+            except ValueError:
+                parsed = value
+        else:
+            parsed = value
+        data[key] = parsed
+
+    if prefix == "FLIGHT":
+        state = data.get("state")
+        if isinstance(state, str):
+            data["stateName"] = state
+            data["state"] = STATE_IDS.get(state, state)
+        elif isinstance(state, int):
+            data["stateName"] = STATE_NAMES.get(state, str(state))
+        if "alt" in data and "relAlt" not in data:
+            data["relAlt"] = data["alt"]
+    elif prefix == "NAV":
+        if "fix" in data:
+            data["gpsFix"] = data["fix"]
+        data["gpsFresh"] = bool(data.get("gpsFix"))
+        data["gps"] = bool(data.get("gpsFix"))
+    elif prefix == "STATUS":
+        state = data.get("state")
+        if isinstance(state, str):
+            data["stateName"] = state
+            data["state"] = STATE_IDS.get(state, state)
+        elif isinstance(state, int):
+            data["stateName"] = STATE_NAMES.get(state, str(state))
+        if "baro" in data:
+            data["baroFresh"] = data["baro"]
+        if "imu" in data:
+            data["imuFresh"] = data["imu"]
+        if "gps" in data:
+            data["gpsFresh"] = data["gps"]
+    return data
+
+
+def parse_serial_line(line: str) -> dict | None:
+    return parse_dbg_line(line) or parse_ground_line(line)
 
 
 class Broadcaster:
@@ -181,7 +255,7 @@ class SerialReader(threading.Thread):
                 raw_line, buf = buf.split(b"\n", 1)
                 line = raw_line.decode("utf-8", errors="ignore").strip()
                 self.lines_seen += 1
-                data = parse_dbg_line(line)
+                data = parse_serial_line(line)
                 if data is not None:
                     self.packets_seen += 1
                     self.broadcaster.publish(data)
@@ -534,7 +608,7 @@ function drawChart(canvas, ctx, key, label, color) {
 function frame() {
   const live = Date.now() - lastPacketAt < 2500;
   document.getElementById('dot').classList.toggle('live', live);
-  document.getElementById('link').textContent = live ? 'serial live' : 'waiting for serial data';
+  document.getElementById('link').textContent = live ? `serial live (${latest.source || 'unknown'})` : 'waiting for serial data';
   drawRocket();
   drawChart(altCanvas, altCtx, 'relAlt', 'Relative altitude (m)', '#73b7ff');
   drawChart(velCanvas, velCtx, 'vel', 'Vertical velocity (m/s)', '#e6bb4a');
@@ -543,9 +617,10 @@ function frame() {
 
 const es = new EventSource('/events');
 es.onmessage = (ev) => {
-  latest = JSON.parse(ev.data);
+  const incoming = JSON.parse(ev.data);
+  latest = {...latest, ...incoming};
   lastPacketAt = Date.now();
-  history.push(latest);
+  history.push({...latest});
   if (history.length > 500) history.shift();
   updateMetrics(latest);
 };

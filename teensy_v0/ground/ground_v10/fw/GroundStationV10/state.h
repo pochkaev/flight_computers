@@ -46,6 +46,13 @@ const uint16_t HEALTH_NAND_OK = 1 << 4;
 const uint16_t HEALTH_LOG_OK  = 1 << 5;
 const uint16_t HEALTH_BATT_OK = 1 << 6;
 
+enum RocketLaunchStatus : uint8_t {
+    LAUNCH_STATUS_INHIBIT = 0,
+    LAUNCH_STATUS_WAIT_STILL,
+    LAUNCH_STATUS_READY,
+    LAUNCH_STATUS_FLIGHT
+};
+
 // Telemetry packets (must match rocket firmware)
 struct __attribute__((packed)) FlightPacketV7 {
     uint8_t  version;
@@ -92,9 +99,9 @@ struct __attribute__((packed)) StatusPacketV8 {
 
     uint16_t batt_mv;
     uint8_t  gps_sats;
-    uint8_t  reserved0;
+    uint8_t  launch_status;
     int16_t  last_rssi_dbm;
-    uint16_t reserved1;
+    uint16_t launch_wait_s;
 };
 
 struct __attribute__((packed)) IdentityPacketV1 {

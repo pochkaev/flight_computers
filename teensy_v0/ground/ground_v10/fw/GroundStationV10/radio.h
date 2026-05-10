@@ -69,6 +69,8 @@ extern bool rocketBattOk;
 extern bool rocketBattWarn;
 extern bool rocketBattCrit;
 extern uint32_t rocketStatusLastMs;
+extern uint8_t rocketLaunchStatus;
+extern uint16_t rocketLaunchWaitS;
 
 // Battery placeholder
 extern float rocketBattV;

@@ -64,7 +64,7 @@ void log_snapshot(const char *type, FlightPhase ph) {
         "age_f=%.1f,age_n=%.1f,age_s=%.1f,age_last=%.1f,"
         "rx_f=%lu,rx_n=%lu,rx_s=%lu,rate_f=%u,rate_n=%u,rate_s=%u,"
         "miss_f=%lu,miss_n=%lu,miss_s=%lu,"
-        "rkt_batt=%.2f,rkt_batt_status=%s,"
+        "rkt_batt=%.2f,rkt_batt_status=%s,launch_status=%u,launch_wait_s=%u,"
         "ok_gps=%u,ok_imu=%u,ok_baro=%u,ok_sd=%u,ok_nand=%u,ok_log=%u,"
         "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u",
         type,
@@ -108,6 +108,8 @@ void log_snapshot(const char *type, FlightPhase ph) {
         (unsigned long)statusMissedCount,
         rocketBattV,
         rocketBattStatusLogName(),
+        (unsigned int)rocketLaunchStatus,
+        (unsigned int)rocketLaunchWaitS,
         rocketGpsOk ? 1u : 0u,
         rocketImuOk ? 1u : 0u,
         rocketBaroOk ? 1u : 0u,

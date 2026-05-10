@@ -33,7 +33,11 @@ This firmware runs on the ground controller and:
 - short button press manually cycles pages for `UI_MANUAL_TIMEOUT_MS`
 - long button press for `UI_RESET_HOLD_MS` resets remembered rocket state and returns to the ground page
 - all pages have a bottom status strip for link, battery, or system warning state
-- `[READY]` focuses on state, system status, battery, GPS, link quality, and rocket health
+- `[READY]` focuses on launch readiness, system status, battery, GPS, link quality, and rocket health
+- while the rocket is still in `PAD`, the large READY-page state shows the rocket launch gate:
+  - `BOOT WAIT`: launch detection is inhibited after power-up
+  - `SETTLING`: the rocket must stay still on the pad
+  - `READY`: launch detection is armed
 - `[LOST]` is recovery-focused and shows age, RSSI, battery, distance, bearing, and last known coordinates
 - `SYS` ignores rocket GPS state; GPS is shown separately as informational status
 - packet miss accounting ignores sequence rollbacks/resets from sender reboot
@@ -498,7 +502,7 @@ Shown automatically when rocket packets are present and the rocket has not launc
 
 | Field | Meaning |
 |---|---|
-| Large state (`IDLE`, `PAD`, etc.) | Rocket flight-state value from telemetry. |
+| Large state (`BOOT WAIT`, `SETTLING`, `READY`, etc.) | Rocket launch-readiness gate while the rocket is still in `PAD`; otherwise the current flight state. |
 | `SYS` | Overall rocket status: `OK`, `WARN`, `CRIT`, or `FAULT`. GPS is not included in this summary. |
 | `BATT` | Rocket battery voltage from the status packet. Color shows OK/WARN/CRIT. |
 | `GPS nSV` | Rocket GPS satellite count. |
@@ -601,3 +605,5 @@ Current cadence:
 - lost link after rocket was seen: `LOST` row every `PAD_LOSTLOG_MS` (`30 s`)
 
 Rows include rocket state, altitude, velocity, GPS, ground GPS/baro, distance/bearing, RSSI, packet ages, receive/miss counts, rocket battery, rocket health, and ground GPS parser counters.
+
+Power-module logging is intentionally sparse. Normal RS-485 status frames are used for the screen but are not written repeatedly to SD. A `PWR_START` row is written only on the rising edge of Start A or Start B. It includes the event name, timestamp, ignition voltage, ground-module voltage, channel currents, key/presence/fault state, local arm/start state, power-module arm/on state, and RS-485 link freshness.

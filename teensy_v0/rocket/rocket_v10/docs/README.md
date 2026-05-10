@@ -34,9 +34,13 @@ Compared with `rocket_v8`, `rocket_v10` currently adds:
   - temperature compensation refreshes at `5 Hz`
   - the main loop no longer waits through full pressure and temperature conversions in one barometer sample
 - barometer vertical velocity is calculated over a short `120 ms` window so the faster pressure stream does not amplify single-sample noise
-- launch detection is baro-driven:
+- launch detection combines acceleration and barometer checks:
+  - blocked for `LAUNCH_POWERON_INHIBIT_MS = 60000 ms` after power-up
+  - then requires `LAUNCH_PAD_STILL_ARM_MS = 30000 ms` of continuous stillness before launch detection is armed
+  - movement before launch clears the launch-ready gate, so carrying the rocket to the pad does not remain armed
   - `relAlt > LAUNCH_REL_ALT_M`
   - `velZ > LAUNCH_VEL_MPS`
+  - current acceleration magnitude `>= LAUNCH_ACCEL_G`
   - held for `LAUNCH_CONFIRM_MS`
   - blocked until the barometer has settled for `LAUNCH_PAD_SETTLE_MS`
   - requires recent rising-altitude trend over `LAUNCH_TREND_MS`
@@ -405,6 +409,12 @@ NAND format status:
 - current firmware writes typed V4 payload records:
   - type `1`: `50 Hz` full-state records
   - type `2`: `200 Hz` compact IMU records
+  - type `3`: barometer records
+  - type `4`: GPS records
+  - type `5`: battery records
+  - type `6`: flight state/event records
+  - type `7`: telemetry snapshot records
+  - type `8`: quaternion attitude records
 - current export decodes only the current V4 header/record combination:
   - `header.version = 4`
   - `header.record_format = 4`
@@ -482,8 +492,8 @@ Behavior:
 - `copy_to_sd=1` exports NAND binary logs to CSV files on SD
 - `clean_nand=1` removes NAND flight log files only after current V4 export completes without hard I/O failures
 - `export_latest_only=1` exports only the newest NAND log and skips older logs
-- `export_imu=0` skips the large high-rate IMU CSV and exports only the full-state CSV
-- full multi-log export with `export_imu=1` can be slow because the Teensy formats large `200 Hz` IMU streams as decimal CSV text
+- `export_imu=0` skips detail CSVs and exports only the full-state CSV
+- full multi-log export with `export_imu=1` can be slow because the Teensy formats multiple binary streams, especially `200 Hz` IMU records, as decimal CSV text
 - result file is written to `/nand_ops_result.txt`
 - command file `/nand_ops.txt` is removed only if the requested operation succeeds
 - test template file:
@@ -522,7 +532,15 @@ Current-only NAND export behavior:
 - valid current-format `RV10NLG` V4 files are exported
 - full-state CSV names look like `rocket_nand_0120_op1004.csv`
 - high-rate IMU CSV names look like `rocket_nand_0120_op1004_imu.csv`
-- high-rate IMU CSV is optional with `export_imu=0`
+- detail CSVs are optional with `export_imu=0`
+- detail CSV names include:
+  - `_imu.csv`
+  - `_baro.csv`
+  - `_gps.csv`
+  - `_batt.csv`
+  - `_event.csv`
+  - `_telem.csv`
+  - `_att.csv`
 - latest-only export is optional with `export_latest_only=1`
 - old/unsupported/corrupt files are counted as `export_skipped`
 - hard read/write/open failures are counted as `export_failed`
@@ -534,6 +552,16 @@ Legacy policy:
 - production firmware does not keep legacy NAND decoders
 - when NAND format changes, old unsupported files are skipped instead of decoded
 - this keeps field firmware smaller and easier to reason about
+
+Post-flight tooling:
+
+- `visualizer/rocket_v10_flight_replay.py` reads exported V4 full-state CSV files, including metadata comment lines
+- if the sibling quaternion attitude CSV exists, for example `rocket_nand_0120_op1004_att.csv`, replay loads it automatically and uses quaternion interpolation for rocket attitude motion
+- if `_att.csv` is missing but the sibling high-rate IMU CSV exists, replay falls back to `_imu.csv` roll/pitch/yaw
+- use `--att-csv path/to/file_att.csv` to select a specific quaternion attitude export
+- use `--imu-csv path/to/file_imu.csv` to select a specific IMU export
+- use `--no-auto-imu` for full-state-only replay after a quick `export_imu=0` field export
+- `visualizer/rocket_v10_flight_report.py` also accepts V4 exports with metadata comment lines
 
 Connection note:
 
@@ -686,10 +714,10 @@ Main rocket log/telemetry values:
 | `gps_base_alt` | GPS altitude baseline captured on pad. |
 | `baro_gps_delta` | Difference between barometric relative altitude and GPS relative altitude. |
 | `baro_gps_diverge` | Diagnostic flag when baro/GPS altitude disagreement is large. Not a flight-state trigger. |
-| `diag_flags` | Bitmask for diagnostics such as baro/GPS divergence. |
+| `diag_flags` | Bitmask for diagnostics: bit `0` baro/GPS divergence, bit `1` attitude accel correction active, bit `2` attitude mag correction active, bit `3` attitude gyro-only mode. |
 | `mx/my/mz` | Magnetometer values from LSM9DS1. Logged for visualization. |
-| `roll/pitch/yaw` | Approximate orientation values. Yaw is magnetometer-based and visualization-only. |
+| `roll/pitch/yaw` | Approximate orientation values derived from the internal quaternion estimator. Yaw is magnetometer-aided when correction is active and remains visualization-only. |
 | `batt_mv` | Battery voltage sent to ground in millivolts. |
 | `health_flags` | Bitmask for barometer, IMU, GPS, SD, NAND, log, and battery health. |
 
-Launch detection uses barometer-derived relative altitude, barometer-derived vertical velocity, pad-settle time, and recent rising-altitude trend. GPS, yaw, and magnetometer data are not used for launch, apogee, recovery, or landed decisions.
+Launch detection is armed only after the power-on inhibit has expired and the rocket has been still for the configured pad-still interval. When that gate arms, the barometer baseline is refreshed at the pad. Launch detection then uses current acceleration magnitude, barometer-derived relative altitude, barometer-derived vertical velocity, pad-settle time, and recent rising-altitude trend. This prevents carry-to-pad barometric spikes from starting `ASCENT` unless the rocket has settled on the pad and then sees a launch-like acceleration. GPS, yaw, and magnetometer data are not used for launch, apogee, recovery, or landed decisions.

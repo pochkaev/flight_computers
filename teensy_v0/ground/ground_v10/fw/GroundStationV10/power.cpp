@@ -38,6 +38,8 @@ static bool okToIgniteA=false;
 static bool okToIgniteB=false;
 static bool prevArmA=false;
 static bool prevArmB=false;
+static bool prevStartAButton=false;
+static bool prevStartBButton=false;
 
 // Master-side fire timeouts
 static bool m_fireTimeoutA=false;
@@ -100,23 +102,40 @@ static RxState rxState=RS_WAIT_55;
 static uint8_t rxBuf[6];
 static uint8_t rxIdx=0;
 
-static void logPowerStatus() {
-  char line[96];
-  // PWR,ign_v=,ia=,ib=,key=,presA=,presB=,fault=,armA=,onA=,armB=,onB=
+static void logPowerStartEvent(const char *eventName,
+                               bool armA_sw,
+                               bool startA_btn,
+                               bool startA_ok,
+                               bool armB_sw,
+                               bool startB_btn,
+                               bool startB_ok) {
+  char line[256];
   snprintf(line, sizeof(line),
-           "PWR,ign_v=%.1f,ia=%.1f,ib=%.1f,key=%d,presA=%d,presB=%d,"
-           "fault=%d,armA=%d,onA=%d,armB=%d,onB=%d",
+           "PWR_START,event=%s,ms=%lu,ign_v=%.1f,gnd_v=%.2f,ia=%.1f,ib=%.1f,"
+           "key=%d,presA=%d,presB=%d,fault=%d,"
+           "armA_sw=%d,startA_btn=%d,startA_ok=%d,armA_seen=%d,onA=%d,"
+           "armB_sw=%d,startB_btn=%d,startB_ok=%d,armB_seen=%d,onB=%d,link=%d",
+           eventName,
+           (unsigned long)millis(),
            pwr_vbat_x10 / 10.0f,
+           pwr_localVbat,
            pwr_ia_x10 / 10.0f,
            pwr_ib_x10 / 10.0f,
            pwr_key_ok ? 1 : 0,
            pwr_presA ? 1 : 0,
            pwr_presB ? 1 : 0,
            pwr_faultAny ? 1 : 0,
+           armA_sw ? 1 : 0,
+           startA_btn ? 1 : 0,
+           startA_ok ? 1 : 0,
            pwr_armA_seen ? 1 : 0,
            pwr_onA ? 1 : 0,
+           armB_sw ? 1 : 0,
+           startB_btn ? 1 : 0,
+           startB_ok ? 1 : 0,
            pwr_armB_seen ? 1 : 0,
-           pwr_onB ? 1 : 0);
+           pwr_onB ? 1 : 0,
+           power_link_fresh() ? 1 : 0);
   sdlog_write(line);
 }
 
@@ -165,7 +184,6 @@ static void serviceRx(){
 
           lastStatusMs = millis();
           rxCount++;
-          logPowerStatus();
           ui_markDirty();
         }
       } break;
@@ -256,6 +274,15 @@ void power_update() {
 
   bool startA_ok = desiredA && !m_fireTimeoutA;
   bool startB_ok = desiredB && !m_fireTimeoutB;
+
+  if (startA_btn && !prevStartAButton) {
+    logPowerStartEvent("A_PRESS", armA_sw, startA_btn, startA_ok, armB_sw, startB_btn, startB_ok);
+  }
+  if (startB_btn && !prevStartBButton) {
+    logPowerStartEvent("B_PRESS", armA_sw, startA_btn, startA_ok, armB_sw, startB_btn, startB_ok);
+  }
+  prevStartAButton = startA_btn;
+  prevStartBButton = startB_btn;
 
   prevDesiredA = desiredA;
   prevDesiredB = desiredB;

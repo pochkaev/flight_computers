@@ -3,9 +3,9 @@
 #include <Arduino.h>
 
 // Firmware identity
-#define ROCKET_FW_VERSION       "rv10.20260427c"
+#define ROCKET_FW_VERSION       "rv10.20260509c"
 #define NAND_RECORD_FORMAT_V4   4
-#define ATTITUDE_ESTIMATOR_V2   2
+#define ATTITUDE_ESTIMATOR_VERSION 3
 
 // LoRa RFM95
 #define LORA_FREQUENCY_HZ   915E6
@@ -76,17 +76,18 @@
 // NAND log rotation:
 // Before opening a new NAND flight log, delete oldest /fltNNNN.bin files
 // until there is enough free space and the file count is below the cap.
-// V4 writes 50 Hz full-state records plus 200 Hz compact IMU records.
-// This is roughly 34 MB/hour before filesystem overhead.
+// V4 writes full-state plus stream-specific IMU, baro, GPS, battery,
+// flight-event, and telemetry records. This is roughly 45 MB/hour before
+// filesystem overhead with the current rates.
 #define NAND_ROTATE_ENABLE       1
 #define NAND_MIN_FREE_BYTES      (16UL * 1024UL * 1024UL)
 #define NAND_MAX_LOG_FILES       96
-#define NAND_LOG_CACHE_BYTES     4096
+#define NAND_LOG_CACHE_BYTES     16384
 
 // Sensor freshness windows
-#define BARO_STALE_MS       300
-#define IMU_STALE_MS        200
-#define GPS_STALE_MS        3000
+#define BARO_STALE_MS       1500
+#define IMU_STALE_MS        1500
+#define GPS_STALE_MS        5000
 
 // Attitude estimator:
 // During boost the accelerometer is dominated by thrust, not gravity. Only use
@@ -96,6 +97,8 @@
 #define IMU_ACCEL_CORRECT_MAX_G 1.25f
 #define IMU_GYRO_ALPHA          0.98f
 #define IMU_MAG_YAW_ALPHA       0.995f
+#define IMU_MAG_CORRECT_MIN_UT  10.0f
+#define IMU_MAG_CORRECT_MAX_UT  90.0f
 #define IMU_ACCEL_RANGE_G       16
 #define IMU_GYRO_RANGE_DPS      2000
 #define IMU_MAG_RANGE_GAUSS     4
@@ -107,6 +110,10 @@
 #define LAUNCH_VEL_MPS            8.0f
 #define LAUNCH_CONFIRM_MS         120
 #define LAUNCH_PAD_SETTLE_MS      2500
+#define LAUNCH_POWERON_INHIBIT_MS 60000u
+#define LAUNCH_PAD_STILL_ARM_MS   30000u
+#define LAUNCH_PAD_STILL_ACCEL_ERR_G 0.20f
+#define LAUNCH_PAD_STILL_GYRO_DPS 12.0f
 #define LAUNCH_TREND_MS           150
 #define LAUNCH_TREND_MIN_M        2.50f
 #define BARO_VEL_WINDOW_MS        120
@@ -160,3 +167,9 @@
 #define HEALTH_NAND_OK      (1u << 4)
 #define HEALTH_LOG_OK       (1u << 5)
 #define HEALTH_BATT_OK      (1u << 6)
+
+// Launch readiness status sent in the reserved status-packet bytes.
+#define LAUNCH_STATUS_INHIBIT     0
+#define LAUNCH_STATUS_WAIT_STILL  1
+#define LAUNCH_STATUS_READY       2
+#define LAUNCH_STATUS_FLIGHT      3

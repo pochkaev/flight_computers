@@ -76,10 +76,13 @@ New in `rocket_v10` already implemented:
   - temperature compensation refresh is `5 Hz`
   - barometer samples no longer block the main loop with back-to-back conversion delays
 - barometer-derived `velZ` uses `BARO_VEL_WINDOW_MS = 120` to avoid amplifying 50 Hz pressure noise
-- baro-driven launch detection:
-  - launch uses `relAlt` and `velZ`
-  - IMU acceleration is no longer a launch trigger
-  - current launch thresholds are `relAlt > 3 m` and `velZ > 8 m/s`
+- launch detection:
+  - launch uses current acceleration magnitude, `relAlt`, and `velZ`
+  - current launch thresholds are `accMagG >= 2 g`, `relAlt > 3 m`, and `velZ > 8 m/s`
+  - launch detection is blocked for `LAUNCH_POWERON_INHIBIT_MS = 60000 ms`
+  - after the inhibit, launch detection arms only after `LAUNCH_PAD_STILL_ARM_MS = 30000 ms` of continuous stillness
+  - movement before launch clears the launch-ready gate
+  - the pad-still and acceleration gates prevent carry-to-pad barometric spikes from starting `ASCENT`
   - launch is blocked for `LAUNCH_PAD_SETTLE_MS = 2500 ms` after baro baseline
   - launch requires a recent rising-altitude trend:
     - `LAUNCH_TREND_MIN_M = 2.50 m`
@@ -96,6 +99,8 @@ New in `rocket_v10` already implemented:
   - SD CSV includes `mx`, `my`, `mz`, and approximate tilt-compensated `yaw`
   - NAND V4 full-state records include magnetometer and approximate yaw at `50 Hz`
   - NAND V4 compact IMU records include accel/gyro/attitude at `200 Hz`
+  - NAND V4 compact attitude records include quaternion, derived Euler attitude, and confidence flags at `200 Hz`
+  - NAND V4 now also writes barometer, GPS, battery, flight event, and telemetry snapshot stream records
   - NAND export is current-format only; legacy decode paths are intentionally not kept in production firmware
   - yaw is visualization-only and is not used by the state machine
 - Step 3 high-rate IMU logging is complete:
@@ -185,12 +190,18 @@ NAND role:
 - internal binary recorder
 - file names like `/rocket_flt0041.bin`
 - service export file names like `rocket_nand_0120_op1004.csv`
-- service export also writes high-rate IMU files like `rocket_nand_0120_op1004_imu.csv`
-- high-rate IMU CSV export is optional with `export_imu=0`
+- service export also writes detail files like `rocket_nand_0120_op1004_imu.csv`, `_baro.csv`, `_gps.csv`, `_batt.csv`, `_event.csv`, `_telem.csv`, and `_att.csv`
+- detail CSV export is optional with `export_imu=0`
 - latest-only service export is available with `export_latest_only=1`
 - current firmware writes `RV10NLG` V4 typed records:
   - type `1`: `50 Hz` full-state records
   - type `2`: `200 Hz` compact IMU records
+  - type `3`: barometer records
+  - type `4`: GPS records
+  - type `5`: battery records
+  - type `6`: flight state/event records
+  - type `7`: telemetry snapshot records
+  - type `8`: quaternion attitude records
 - current firmware exports only the current V4 header/record combination
 - legacy NAND decode paths are intentionally not kept in production firmware; unsupported files are reported as `export_skipped`
 - NAND rotation is enabled:
@@ -232,7 +243,7 @@ Important:
 
 1. GPS can still be weak inside the device, so it remains diagnostic/secondary and not flight-critical.
 2. Rocket battery must be checked before flight; recent bench telemetry showed a critical 1S voltage around `3.59 V`.
-3. Full multi-log IMU CSV export is slow by design because it converts `200 Hz` binary IMU records into decimal CSV on Teensy; use `export_latest_only=1` and `export_imu=0` for quick field checks.
+3. Full multi-log detail CSV export is slow by design because it converts multiple binary streams, especially `200 Hz` IMU records, into decimal CSV on Teensy; use `export_latest_only=1` and `export_imu=0` for quick field checks.
 4. Current LoRa telemetry is binary and now scheduled correctly, but future field data may still suggest smaller or different packets.
 
 ## Recommended next work

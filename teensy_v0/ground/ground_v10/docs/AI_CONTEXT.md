@@ -184,7 +184,12 @@ Common bottom strip:
 
 `[READY]` is now readiness-focused:
 
-- rocket state is prominent but not full-screen
+- rocket launch-readiness state is prominent but not full-screen
+- while the rocket is in `PAD`, the large state uses the decoded launch gate:
+  - `BOOT WAIT`
+  - `SETTLING`
+  - `READY`
+- the READY page header stays as `[READY]`; the right-side header status was removed so it cannot duplicate or stale-display the launch gate
 - `SYS` is shown beside state
 - battery, GPS sats, compact `H` HDOP, link/RSSI/age, AGL/velocity/baro sanity checks, RX rates, and health labels are shown
 - `IMU BARO LOG SD NAND` health labels are drawn large enough to read above the bottom strip
@@ -258,6 +263,8 @@ Changes made:
 - rate-limited ground logging:
   - `FLIGHT_LOG_MS = 200`
   - `RECOVERY_LOG_MS = 1000`
+- repeated RS-485 power-module status rows are not written to SD
+- `PWR_START` is written only on a Start A or Start B press edge and includes timestamp, ignition voltage, local ground voltage, channel currents, key/presence/fault state, local switch/button state, power-module arm/on state, and link freshness
 
 ### 3. Ground battery reading correction
 

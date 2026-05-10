@@ -180,6 +180,39 @@ static const char* rocketStateName() {
     }
 }
 
+static const char* rocketLaunchStatusName() {
+    switch (rocketLaunchStatus) {
+        case LAUNCH_STATUS_INHIBIT:    return "BOOT WAIT";
+        case LAUNCH_STATUS_WAIT_STILL: return "SETTLING";
+        case LAUNCH_STATUS_READY:      return "READY";
+        case LAUNCH_STATUS_FLIGHT:     return "FLIGHT";
+        default:                       return "UNKNOWN";
+    }
+}
+
+static uint16_t rocketLaunchStatusColor() {
+    switch (rocketLaunchStatus) {
+        case LAUNCH_STATUS_READY:
+        case LAUNCH_STATUS_FLIGHT:
+            return COLOR_OK;
+        case LAUNCH_STATUS_INHIBIT:
+        case LAUNCH_STATUS_WAIT_STILL:
+            return COLOR_WARN;
+        default:
+            return COLOR_BAD;
+    }
+}
+
+static const char* rocketReadyDisplayName() {
+    if (rocketFlightState == FS_PAD) return rocketLaunchStatusName();
+    return rocketStateName();
+}
+
+static uint16_t rocketReadyDisplayColor() {
+    if (rocketFlightState == FS_PAD) return rocketLaunchStatusColor();
+    return COLOR_ACCENT;
+}
+
 void ui_update() {
     uint32_t now = millis();
     if (now - lastUiMs < UI_UPDATE_MS) {
@@ -372,7 +405,7 @@ static void drawPreflight() {
 }
 
 static void drawRocketStatus() {
-    drawHeader("[READY]", rocketStateName(), pageChangedThisFrame);
+    drawHeader("[READY]", nullptr, pageChangedThisFrame);
     if (pageChangedThisFrame) clearPageBody();
 
     float relAlt = rocketRelAltM();
@@ -380,13 +413,20 @@ static void drawRocketStatus() {
     clearTextRow(HDR_H + 8, 42);
     tft.setTextSize(3);
     tft.setCursor(10, HDR_H + 14);
-    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
-    tft.print(rocketStateName());
+    tft.setTextColor(rocketReadyDisplayColor(), COLOR_BG);
+    tft.print(rocketReadyDisplayName());
+    if (rocketFlightState == FS_PAD &&
+        (rocketLaunchStatus == LAUNCH_STATUS_INHIBIT || rocketLaunchStatus == LAUNCH_STATUS_WAIT_STILL)) {
+        tft.setTextSize(2);
+        tft.print(" ");
+        tft.print((unsigned int)rocketLaunchWaitS);
+        tft.print("s");
+    }
 
     tft.setTextSize(2);
-    tft.setCursor(190, HDR_H + 12);
+    tft.setCursor(240, HDR_H + 12);
     tft.print("SYS");
-    tft.setCursor(190, HDR_H + 32);
+    tft.setCursor(240, HDR_H + 32);
     tft.setTextColor(rocketOverallStatusColor(), COLOR_BG);
     tft.print(rocketOverallStatus());
     tft.setTextColor(COLOR_TEXT, COLOR_BG);

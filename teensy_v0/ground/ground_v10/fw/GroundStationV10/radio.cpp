@@ -52,6 +52,8 @@ bool rocketBattOk = true;
 bool rocketBattWarn = false;
 bool rocketBattCrit = false;
 uint32_t rocketStatusLastMs = 0;
+uint8_t rocketLaunchStatus = LAUNCH_STATUS_INHIBIT;
+uint16_t rocketLaunchWaitS = 0;
 
 float rocketBattV = ROCKET_BATT_VOLTAGE;
 
@@ -147,10 +149,12 @@ static void debugNavPacket() {
 }
 
 static void debugStatusPacket() {
-    char line[160];
+    char line[192];
     snprintf(line, sizeof(line),
-             "STATUS state=%s batt=%.2f battStatus=%s gps=%u imu=%u baro=%u sd=%u nand=%u log=%u rssi=%d",
+             "STATUS state=%s launch=%u wait=%u batt=%.2f battStatus=%s gps=%u imu=%u baro=%u sd=%u nand=%u log=%u rssi=%d",
              flightStateName(rocketFlightState),
+             (unsigned int)rocketLaunchStatus,
+             (unsigned int)rocketLaunchWaitS,
              rocketBattV,
              rocketBattCrit ? "CRIT" : (rocketBattWarn ? "WARN" : "OK"),
              rocketGpsOk ? 1u : 0u,
@@ -469,6 +473,8 @@ void radio_update() {
         rocketFlightState = (RocketFlightState)pkt.state;
         rocketBattV = pkt.batt_mv / 1000.0f;
         rktSats = pkt.gps_sats;
+        rocketLaunchStatus = pkt.launch_status;
+        rocketLaunchWaitS = pkt.launch_wait_s;
         rocketBaroOk = (pkt.health_flags & HEALTH_BARO_OK);
         rocketImuOk  = (pkt.health_flags & HEALTH_IMU_OK);
         rocketGpsOk  = (pkt.health_flags & HEALTH_GPS_OK);
@@ -588,6 +594,8 @@ void radio_resetState() {
     rocketBattWarn = false;
     rocketBattCrit = false;
     rocketStatusLastMs = 0;
+    rocketLaunchStatus = LAUNCH_STATUS_INHIBIT;
+    rocketLaunchWaitS = 0;
 
     ui_markDirty();
 }

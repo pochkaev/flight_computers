@@ -65,20 +65,31 @@ def finite_int(value: str | None) -> int | None:
     return int(parsed) if parsed is not None else None
 
 
+def read_data_rows(path: str) -> list[dict[str, str]]:
+    csv_lines: list[str] = []
+    with open(path, newline="") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            csv_lines.append(line)
+    if not csv_lines:
+        return []
+    return list(csv.DictReader(csv_lines))
+
+
 def load_rows(path: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        for source in reader:
-            row: dict[str, Any] = {}
-            for field in FIELDS:
-                if field in ("state", "flags", "gps_fix", "sats"):
-                    row[field] = finite_int(source.get(field))
-                else:
-                    row[field] = finite_float(source.get(field))
-            if row.get("ms") is None or row.get("rel_alt_m") is None:
-                continue
-            rows.append(row)
+    for source in read_data_rows(path):
+        row: dict[str, Any] = {}
+        for field in FIELDS:
+            if field in ("state", "flags", "gps_fix", "sats"):
+                row[field] = finite_int(source.get(field))
+            else:
+                row[field] = finite_float(source.get(field))
+        if row.get("ms") is None or row.get("rel_alt_m") is None:
+            continue
+        rows.append(row)
     if not rows:
         return rows
 

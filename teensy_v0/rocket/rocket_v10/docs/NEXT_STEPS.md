@@ -103,10 +103,10 @@ Implemented items:
 Pass criteria:
 
 - exported logs contain a high-rate `_imu.csv` with accel/gyro data: complete
-- replay can use high-rate IMU data for the rocket model: data is available; replay parser update remains in Step 7
+- replay can use high-rate IMU data for the rocket model: complete for exported V4 CSV plus sibling `_imu.csv`
 - no LoRa rate increase is required: complete
 
-## Step 4: NAND Log Format V4
+## Step 4: NAND Log Format V4 - Completed
 
 Purpose:
 
@@ -124,16 +124,21 @@ Implemented items:
 - add stream-specific records:
   - full state
   - IMU
-
-Remaining items:
-
-- add stream-specific records:
   - barometer
   - GPS
   - battery
   - flight state/event
   - telemetry snapshot
-- optional future export optimization if full IMU CSV export remains too slow for field workflow
+- service export writes full-state CSV plus optional detail CSVs:
+  - `_imu.csv`
+  - `_baro.csv`
+  - `_gps.csv`
+  - `_batt.csv`
+  - `_event.csv`
+  - `_telem.csv`
+  - `_att.csv`
+- quick field export can still skip detail CSVs with `export_imu=0`
+- optional future export optimization remains possible if full detail CSV export is too slow for field workflow
 
 Pass criteria:
 
@@ -141,37 +146,45 @@ Pass criteria:
 - export remains deterministic and easy to analyze
 - visualizer can consume V4 logs directly
 
-## Step 5: Quaternion Attitude Estimator
+## Step 5: Quaternion Attitude Estimator - Completed
 
 Purpose:
 
 - replace Euler-angle integration with a more stable representation
 - improve 3D replay and future control-readiness
 
-Current state:
+Implemented state:
 
-- estimator uses gyro integration with gated accel/mag correction
+- estimator now stores attitude internally as a quaternion
+- gyro integration now runs in quaternion space
 - accelerometer correction is disabled when acceleration is far from `1g`
-- this is better than the old estimator but still not control-grade
-
-Planned items:
-
-- store attitude as a quaternion internally
-- integrate gyro rates in quaternion space
-- correct tilt from accelerometer only when acceleration magnitude is sane
-- correct yaw from magnetometer only when magnetic field magnitude/direction is sane
-- expose estimator confidence flags:
+- magnetometer yaw correction is gated by acceleration sanity and magnetic-field magnitude
+- existing roll/pitch/yaw telemetry and CSV fields are still derived for compatibility
+- exported metadata reports attitude estimator version `3`
+- diagnostic flags expose:
   - accel correction active
   - mag correction active
   - gyro-only mode
-  - possible clipping/saturation
-- log quaternion or compact attitude record to NAND
+- compact high-rate attitude records log:
+  - quaternion
+  - derived roll/pitch/yaw
+  - estimator confidence flags
+- service export writes `_att.csv`
+- replay auto-loads sibling `_att.csv`, uses quaternion interpolation when available, and shows confidence state
+
+Current limitations:
+
+- this is better than the Euler-state estimator but still not control-grade
+
+Future tuning:
+
+- possible clipping/saturation
 
 Pass criteria:
 
 - no artificial roll/pitch flips during boost due to thrust acceleration
-- replay uses quaternion attitude when available
-- logs make it clear when attitude is gyro-only and may drift
+- replay uses quaternion attitude when available: complete
+- logs make it clear when attitude is gyro-only and may drift: complete
 
 ## Step 6: GPS Configuration
 
@@ -195,26 +208,30 @@ Pass criteria:
 - exported logs show GPS timing and quality clearly
 - replay ground track is smoother and easier to trust
 
-## Step 7: Replay and Analysis Upgrade
+## Step 7: Replay and Analysis Upgrade - Completed
 
 Purpose:
 
 - make visualization reflect the new multi-rate logs
 - separate real measured data from estimated/interpolated data
 
-Planned items:
+Implemented items:
 
 - update replay generator to read V4 logs
 - use high-rate IMU stream for rocket body motion
 - use barometer stream for altitude
 - use GPS stream for ground track
-- show estimator confidence on the replay
 - show sensor-rate summary:
-  - IMU samples/sec
+  - full-state samples/sec
+  - IMU samples/sec when `_imu.csv` is available
+- allow full-state-only replay when quick field export used `export_imu=0`
+- update flight report parser to skip exported V4 metadata comment lines
+- show estimator confidence on the replay with `_att.csv`
+- show richer sensor-rate summary:
   - baro samples/sec
   - GPS samples/sec
-  - dropped records
-- visually mark periods where attitude is gyro-only
+  - long stream gaps
+- visually mark periods where attitude is gyro-only in the scene, charts, and timeline
 
 Pass criteria:
 
@@ -270,7 +287,8 @@ Possible future hardware:
 3. Completed: NAND V4 typed records.
 4. Completed: high-rate `200 Hz` IMU-only NAND stream.
 5. Completed: V4 export tooling, including latest-only and optional IMU export.
-6. Update replay to consume multi-rate logs.
-7. Replace Euler attitude internals with quaternion estimator.
-8. Add GPS configuration and metadata.
-9. Add optional barometer timing benchmark if sample spacing or noise looks suspicious.
+6. Completed: finish V4 stream-specific records.
+7. Completed: update replay to consume multi-rate logs.
+8. Completed: replace Euler attitude internals with quaternion estimator.
+9. Add GPS configuration and metadata.
+10. Add optional barometer timing benchmark if sample spacing or noise looks suspicious.

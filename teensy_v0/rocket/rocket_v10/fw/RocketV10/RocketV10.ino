@@ -44,8 +44,17 @@ static const uint16_t FLAG_APOGEE = 1 << 1;
 static const uint16_t FLAG_LANDED = 1 << 2;
 
 static const uint16_t DIAG_BARO_GPS_DIVERGE = 1 << 0;
+static const uint16_t DIAG_ATT_ACCEL_CORR = 1 << 1;
+static const uint16_t DIAG_ATT_MAG_CORR = 1 << 2;
+static const uint16_t DIAG_ATT_GYRO_ONLY = 1 << 3;
 static const uint8_t NAND_RECORD_FULL_STATE_V4 = 1;
 static const uint8_t NAND_RECORD_IMU_V4 = 2;
+static const uint8_t NAND_RECORD_BARO_V4 = 3;
+static const uint8_t NAND_RECORD_GPS_V4 = 4;
+static const uint8_t NAND_RECORD_BATT_V4 = 5;
+static const uint8_t NAND_RECORD_EVENT_V4 = 6;
+static const uint8_t NAND_RECORD_TELEM_V4 = 7;
+static const uint8_t NAND_RECORD_ATTITUDE_V4 = 8;
 
 enum BaroReadStatus {
   BARO_READ_WAITING = 0,
@@ -95,9 +104,9 @@ struct __attribute__((packed)) StatusPacketV8 {
   uint32_t ms;
   uint16_t batt_mv;
   uint8_t  gps_sats;
-  uint8_t  reserved0;
+  uint8_t  launch_status;
   int16_t  last_rssi_dbm;
-  uint16_t reserved1;
+  uint16_t launch_wait_s;
 };
 static_assert(sizeof(StatusPacketV8) == 20, "StatusPacketV8 size mismatch");
 
@@ -246,6 +255,110 @@ struct __attribute__((packed)) NandImuRecordV4 {
   uint8_t flags;
 };
 static_assert(sizeof(NandImuRecordV4) == 28, "NandImuRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandBaroRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  int32_t alt_cm;
+  int32_t rel_alt_cm;
+  int16_t vel_cms;
+  int16_t temp_centi_c;
+  uint32_t pressure_pa_x10;
+  uint16_t diag_flags;
+  uint8_t state;
+  uint8_t flags;
+};
+static_assert(sizeof(NandBaroRecordV4) == 28, "NandBaroRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandGpsRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  int32_t lat_e7;
+  int32_t lon_e7;
+  int32_t alt_cm;
+  int32_t rel_alt_cm;
+  int32_t baro_gps_delta_cm;
+  int16_t speed_cms;
+  uint16_t fix_age_ms_x10;
+  uint16_t chars_delta;
+  uint16_t pass_delta;
+  uint16_t fail_delta;
+  uint8_t fix_type;
+  uint8_t sats;
+  uint8_t hdop_x10;
+  uint8_t flags;
+};
+static_assert(sizeof(NandGpsRecordV4) == 42, "NandGpsRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandBatteryRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  uint16_t batt_mv;
+  uint16_t raw_mv;
+  uint16_t pin_mv;
+  uint8_t pack;
+  uint8_t status_flags;
+};
+static_assert(sizeof(NandBatteryRecordV4) == 16, "NandBatteryRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandEventRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  uint8_t event_type;
+  uint8_t from_state;
+  uint8_t to_state;
+  uint8_t close_reason;
+  uint16_t flight_flags;
+  uint16_t diag_flags;
+  int32_t rel_alt_cm;
+  int16_t vel_cms;
+  uint16_t health_flags;
+};
+static_assert(sizeof(NandEventRecordV4) == 24, "NandEventRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandTelemetryRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  uint8_t packet_type;
+  uint8_t state;
+  uint16_t health_flags;
+  uint32_t packet_seq;
+  uint32_t flight_seq;
+  uint32_t nav_seq;
+  uint32_t status_seq;
+  uint32_t identity_seq;
+  int16_t last_rssi_dbm;
+  uint16_t batt_mv;
+};
+static_assert(sizeof(NandTelemetryRecordV4) == 36, "NandTelemetryRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandAttitudeRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  int16_t qw_i16;
+  int16_t qx_i16;
+  int16_t qy_i16;
+  int16_t qz_i16;
+  int16_t roll_cdeg;
+  int16_t pitch_cdeg;
+  int16_t yaw_cdeg;
+  uint16_t diag_flags;
+  uint8_t state;
+  uint8_t flags;
+};
+static_assert(sizeof(NandAttitudeRecordV4) == 26, "NandAttitudeRecordV4 size mismatch");
 
 struct ServiceRequest {
   bool valid = false;
@@ -515,6 +628,13 @@ float last_mz = 0.0f;
 float roll = 0.0f;
 float pitch = 0.0f;
 float yaw = 0.0f;
+float attitudeQw = 1.0f;
+float attitudeQx = 0.0f;
+float attitudeQy = 0.0f;
+float attitudeQz = 0.0f;
+bool attitudeAccelCorrectionActive = false;
+bool attitudeMagCorrectionActive = false;
+bool attitudeGyroOnly = true;
 
 bool gpsHasFix = false;
 uint8_t gpsFixType = 0;
@@ -547,12 +667,19 @@ uint32_t coastDetectSinceMs = 0;
 uint32_t apogeeDetectSinceMs = 0;
 uint32_t landedDetectSinceMs = 0;
 uint32_t landedStillSinceMs = 0;
+uint32_t launchArmStillSinceMs = 0;
+uint32_t launchArmedMs = 0;
 uint32_t lastGpsDataMs = 0;
 uint32_t lastImuSampleMs = 0;
 uint32_t lastBaroSampleMs = 0;
 uint32_t lastGpsFixMs = 0;
 uint32_t lastGpsBaseUpdateMs = 0;
+uint32_t lastGpsLoggedMs = 0;
+uint32_t lastGpsCharsLogged = 0;
+uint32_t lastGpsPassLogged = 0;
+uint32_t lastGpsFailLogged = 0;
 uint32_t padSettleStartMs = 0;
+bool launchArmed = false;
 
 static const uint8_t REL_ALT_HISTORY_COUNT = 8;
 float relAltHistoryM[REL_ALT_HISTORY_COUNT] = {};
@@ -586,6 +713,78 @@ static float wrapPi(float angle) {
 
 static float angleDelta(float from, float to) {
   return wrapPi(to - from);
+}
+
+static int16_t quantizeUnitI16(float value) {
+  value = max(-1.0f, min(1.0f, value));
+  return (int16_t)lroundf(value * 32767.0f);
+}
+
+static float clampFloat(float value, float lo, float hi) {
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
+}
+
+static void normalizeAttitudeQuat() {
+  const float norm = sqrtf(attitudeQw * attitudeQw + attitudeQx * attitudeQx +
+                           attitudeQy * attitudeQy + attitudeQz * attitudeQz);
+  if (!isfinite(norm) || norm < 1.0e-6f) {
+    attitudeQw = 1.0f;
+    attitudeQx = 0.0f;
+    attitudeQy = 0.0f;
+    attitudeQz = 0.0f;
+    return;
+  }
+  const float inv = 1.0f / norm;
+  attitudeQw *= inv;
+  attitudeQx *= inv;
+  attitudeQy *= inv;
+  attitudeQz *= inv;
+}
+
+static void setAttitudeQuatFromEuler(float rollRad, float pitchRad, float yawRad) {
+  const float cr = cosf(rollRad * 0.5f);
+  const float sr = sinf(rollRad * 0.5f);
+  const float cp = cosf(pitchRad * 0.5f);
+  const float sp = sinf(pitchRad * 0.5f);
+  const float cy = cosf(yawRad * 0.5f);
+  const float sy = sinf(yawRad * 0.5f);
+
+  attitudeQw = cr * cp * cy + sr * sp * sy;
+  attitudeQx = sr * cp * cy - cr * sp * sy;
+  attitudeQy = cr * sp * cy + sr * cp * sy;
+  attitudeQz = cr * cp * sy - sr * sp * cy;
+  normalizeAttitudeQuat();
+}
+
+static void updateEulerFromAttitudeQuat() {
+  normalizeAttitudeQuat();
+  const float sinrCosp = 2.0f * (attitudeQw * attitudeQx + attitudeQy * attitudeQz);
+  const float cosrCosp = 1.0f - 2.0f * (attitudeQx * attitudeQx + attitudeQy * attitudeQy);
+  roll = atan2f(sinrCosp, cosrCosp);
+
+  const float sinp = 2.0f * (attitudeQw * attitudeQy - attitudeQz * attitudeQx);
+  pitch = asinf(clampFloat(sinp, -1.0f, 1.0f));
+
+  const float sinyCosp = 2.0f * (attitudeQw * attitudeQz + attitudeQx * attitudeQy);
+  const float cosyCosp = 1.0f - 2.0f * (attitudeQy * attitudeQy + attitudeQz * attitudeQz);
+  yaw = atan2f(sinyCosp, cosyCosp);
+  if (yaw < 0.0f) yaw += 2.0f * PI;
+}
+
+static void integrateAttitudeQuatGyro(float gxRadS, float gyRadS, float gzRadS, float dt) {
+  const float halfDt = 0.5f * dt;
+  const float qw = attitudeQw;
+  const float qx = attitudeQx;
+  const float qy = attitudeQy;
+  const float qz = attitudeQz;
+
+  attitudeQw += (-qx * gxRadS - qy * gyRadS - qz * gzRadS) * halfDt;
+  attitudeQx += ( qw * gxRadS + qy * gzRadS - qz * gyRadS) * halfDt;
+  attitudeQy += ( qw * gyRadS - qx * gzRadS + qz * gxRadS) * halfDt;
+  attitudeQz += ( qw * gzRadS + qx * gyRadS - qy * gxRadS) * halfDt;
+  normalizeAttitudeQuat();
 }
 
 static void copyFixedString(char *dst, size_t dstSize, const char *src) {
@@ -662,6 +861,51 @@ static void resetRelAltHistory(uint32_t nowMs, float relAlt) {
   }
   relAltHistoryIndex = 0;
   relAltHistoryFilled = true;
+}
+
+static void clearLaunchArmGate() {
+  launchArmed = false;
+  launchArmedMs = 0;
+  launchArmStillSinceMs = 0;
+  launchDetectSinceMs = 0;
+}
+
+static void setLaunchArmGate(uint32_t nowMs, float currentAltM) {
+  launchArmed = true;
+  launchArmedMs = nowMs;
+  baseAltM = filtAlt;
+  velRefAltM = currentAltM;
+  velRefMs = nowMs;
+  velZ = 0.0f;
+  resetRelAltHistory(nowMs, 0.0f);
+}
+
+static uint16_t secondsCeilRemaining(uint32_t elapsedMs, uint32_t targetMs) {
+  if (elapsedMs >= targetMs) return 0;
+  uint32_t remainingMs = targetMs - elapsedMs;
+  uint32_t seconds = (remainingMs + 999u) / 1000u;
+  return seconds > 65535u ? 65535u : (uint16_t)seconds;
+}
+
+static uint8_t currentLaunchStatus(uint16_t &waitSecondsOut) {
+  waitSecondsOut = 0;
+  const uint32_t nowMs = millis();
+  if (flightState != FS_IDLE && flightState != FS_PAD) {
+    return LAUNCH_STATUS_FLIGHT;
+  }
+  if (nowMs < LAUNCH_POWERON_INHIBIT_MS) {
+    waitSecondsOut = secondsCeilRemaining(nowMs, LAUNCH_POWERON_INHIBIT_MS);
+    return LAUNCH_STATUS_INHIBIT;
+  }
+  if (launchArmed) {
+    return LAUNCH_STATUS_READY;
+  }
+  if (launchArmStillSinceMs != 0) {
+    waitSecondsOut = secondsCeilRemaining((uint32_t)(nowMs - launchArmStillSinceMs), LAUNCH_PAD_STILL_ARM_MS);
+  } else {
+    waitSecondsOut = LAUNCH_PAD_STILL_ARM_MS / 1000u;
+  }
+  return LAUNCH_STATUS_WAIT_STILL;
 }
 
 static void pushRelAltHistory(uint32_t nowMs, float relAlt) {
@@ -967,7 +1211,7 @@ static bool rewriteNandLogHeader(bool finalized, NandCloseReason closeReason) {
   header.gyro_range_dps = IMU_GYRO_RANGE_DPS;
   header.accel_range_g = IMU_ACCEL_RANGE_G;
   header.mag_range_gauss = IMU_MAG_RANGE_GAUSS;
-  header.estimator_version = ATTITUDE_ESTIMATOR_V2;
+  header.estimator_version = ATTITUDE_ESTIMATOR_VERSION;
   header.record_format = NAND_RECORD_FORMAT_V4;
 
   size_t endPos = nandLogFile.size();
@@ -1108,7 +1352,7 @@ static void ensureLogOpen() {
       header.gyro_range_dps = IMU_GYRO_RANGE_DPS;
       header.accel_range_g = IMU_ACCEL_RANGE_G;
       header.mag_range_gauss = IMU_MAG_RANGE_GAUSS;
-      header.estimator_version = ATTITUDE_ESTIMATOR_V2;
+      header.estimator_version = ATTITUDE_ESTIMATOR_VERSION;
       header.record_format = NAND_RECORD_FORMAT_V4;
       nandRecordCount = 0;
       nandLogCacheBytes = 0;
@@ -1270,6 +1514,209 @@ static void logNandImuBinary(uint32_t nowMs) {
       if (nandLogFile) nandLogFile.close();
     }
   }
+#endif
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
+
+static void logNandBaroBinary(uint32_t nowMs) {
+#if HAS_LITTLEFS_QPINAND
+  ensureLogOpen();
+  if (nandLogFile) {
+    NandBaroRecordV4 rec = {};
+    rec.type = NAND_RECORD_BARO_V4;
+    rec.size = sizeof(rec);
+    rec.sequence = nandRecordSequence++;
+    rec.ms = nowMs;
+    rec.alt_cm = (int32_t)lroundf(filtAlt * 100.0f);
+    rec.rel_alt_cm = (int32_t)lroundf(currentBaroRelAltM() * 100.0f);
+    rec.vel_cms = (int16_t)lroundf(velZ * 100.0f);
+    rec.temp_centi_c = (int16_t)lroundf(filtTempC * 100.0f);
+    rec.pressure_pa_x10 = (uint32_t)lroundf(filtPressurePa * 10.0f);
+    rec.diag_flags = diagFlags;
+    rec.state = (uint8_t)flightState;
+    rec.flags = 0;
+    if (!appendNandRecord(&rec, sizeof(rec))) {
+      nandLogOk = false;
+      if (nandLogFile) nandLogFile.close();
+    }
+  }
+#else
+  (void)nowMs;
+#endif
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
+
+static void logNandGpsBinary(uint32_t nowMs) {
+#if HAS_LITTLEFS_QPINAND
+  if (lastGpsDataMs == 0 || (uint32_t)(nowMs - lastGpsLoggedMs) < NAV_TX_MS) return;
+  ensureLogOpen();
+  if (nandLogFile) {
+    const uint32_t charsNow = gps.charsProcessed();
+    const uint32_t passNow = gps.passedChecksum();
+    const uint32_t failNow = gps.failedChecksum();
+    NandGpsRecordV4 rec = {};
+    rec.type = NAND_RECORD_GPS_V4;
+    rec.size = sizeof(rec);
+    rec.sequence = nandRecordSequence++;
+    rec.ms = nowMs;
+    rec.lat_e7 = (int32_t)llround(gpsLatDeg * 1e7);
+    rec.lon_e7 = (int32_t)llround(gpsLonDeg * 1e7);
+    rec.alt_cm = (int32_t)lroundf(gpsAltM * 100.0f);
+    rec.rel_alt_cm = haveGpsBaseAlt ? (int32_t)lroundf(gpsRelAltM * 100.0f) : INT32_MIN;
+    rec.baro_gps_delta_cm = isfinite(baroGpsDeltaM) ? (int32_t)lroundf(baroGpsDeltaM * 100.0f) : INT32_MIN;
+    rec.speed_cms = (int16_t)lroundf(gpsSpeedMps * 100.0f);
+    const uint32_t fixAgeMs = gpsHasFix ? 0u : (lastGpsFixMs ? (nowMs - lastGpsFixMs) : 0xFFFFFFFFu);
+    rec.fix_age_ms_x10 = (uint16_t)min(fixAgeMs / 10u, 65535u);
+    rec.chars_delta = (uint16_t)min(charsNow - lastGpsCharsLogged, 65535u);
+    rec.pass_delta = (uint16_t)min(passNow - lastGpsPassLogged, 65535u);
+    rec.fail_delta = (uint16_t)min(failNow - lastGpsFailLogged, 65535u);
+    rec.fix_type = gpsFixType;
+    rec.sats = gpsSats;
+    rec.hdop_x10 = (uint8_t)min((uint32_t)lroundf(gpsHdop * 10.0f), 255u);
+    rec.flags = 0;
+    if (gps.location.isValid()) rec.flags |= 1u << 0;
+    if (gps.altitude.isValid()) rec.flags |= 1u << 1;
+    if (gps.date.isValid()) rec.flags |= 1u << 2;
+    if (gps.time.isValid()) rec.flags |= 1u << 3;
+    if (!appendNandRecord(&rec, sizeof(rec))) {
+      nandLogOk = false;
+      if (nandLogFile) nandLogFile.close();
+    } else {
+      lastGpsLoggedMs = nowMs;
+      lastGpsCharsLogged = charsNow;
+      lastGpsPassLogged = passNow;
+      lastGpsFailLogged = failNow;
+    }
+  }
+#else
+  (void)nowMs;
+#endif
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
+
+static void logNandBatteryBinary(uint32_t nowMs) {
+#if HAS_LITTLEFS_QPINAND
+  ensureLogOpen();
+  if (nandLogFile) {
+    NandBatteryRecordV4 rec = {};
+    rec.type = NAND_RECORD_BATT_V4;
+    rec.size = sizeof(rec);
+    rec.sequence = nandRecordSequence++;
+    rec.ms = nowMs;
+    rec.batt_mv = (uint16_t)lroundf(rocketBattV * 1000.0f);
+    rec.raw_mv = (uint16_t)lroundf(rocketBattRawV * 1000.0f);
+    rec.pin_mv = (uint16_t)lroundf(lastBattPinV * 1000.0f);
+    rec.pack = (uint8_t)batteryPack;
+    rec.status_flags = 0;
+    if (batteryWarn) rec.status_flags |= 1u << 0;
+    if (batteryCrit) rec.status_flags |= 1u << 1;
+    if (!appendNandRecord(&rec, sizeof(rec))) {
+      nandLogOk = false;
+      if (nandLogFile) nandLogFile.close();
+    }
+  }
+#else
+  (void)nowMs;
+#endif
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
+
+static void logNandEventBinary(uint32_t nowMs, uint8_t eventType, FlightState fromState,
+                               FlightState toState, NandCloseReason closeReason) {
+#if HAS_LITTLEFS_QPINAND
+  ensureLogOpen();
+  if (nandLogFile) {
+    NandEventRecordV4 rec = {};
+    rec.type = NAND_RECORD_EVENT_V4;
+    rec.size = sizeof(rec);
+    rec.sequence = nandRecordSequence++;
+    rec.ms = nowMs;
+    rec.event_type = eventType;
+    rec.from_state = (uint8_t)fromState;
+    rec.to_state = (uint8_t)toState;
+    rec.close_reason = (uint8_t)closeReason;
+    rec.flight_flags = flightFlags;
+    rec.diag_flags = diagFlags;
+    rec.rel_alt_cm = (int32_t)lroundf(currentBaroRelAltM() * 100.0f);
+    rec.vel_cms = (int16_t)lroundf(velZ * 100.0f);
+    rec.health_flags = buildHealthFlags();
+    if (!appendNandRecord(&rec, sizeof(rec))) {
+      nandLogOk = false;
+      if (nandLogFile) nandLogFile.close();
+    }
+  }
+#else
+  (void)nowMs;
+  (void)eventType;
+  (void)fromState;
+  (void)toState;
+  (void)closeReason;
+#endif
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
+
+static void logNandTelemetryBinary(uint32_t nowMs, uint8_t packetType, uint32_t packetSeq) {
+#if HAS_LITTLEFS_QPINAND
+  ensureLogOpen();
+  if (nandLogFile) {
+    NandTelemetryRecordV4 rec = {};
+    rec.type = NAND_RECORD_TELEM_V4;
+    rec.size = sizeof(rec);
+    rec.sequence = nandRecordSequence++;
+    rec.ms = nowMs;
+    rec.packet_type = packetType;
+    rec.state = (uint8_t)flightState;
+    rec.health_flags = buildHealthFlags();
+    rec.packet_seq = packetSeq;
+    rec.flight_seq = flightSeq;
+    rec.nav_seq = navSeq;
+    rec.status_seq = statusSeq;
+    rec.identity_seq = identitySeq;
+    rec.last_rssi_dbm = (int16_t)LoRa.packetRssi();
+    rec.batt_mv = (uint16_t)lroundf(rocketBattV * 1000.0f);
+    if (!appendNandRecord(&rec, sizeof(rec))) {
+      nandLogOk = false;
+      if (nandLogFile) nandLogFile.close();
+    }
+  }
+#else
+  (void)nowMs;
+  (void)packetType;
+  (void)packetSeq;
+#endif
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
+
+static void logNandAttitudeBinary(uint32_t nowMs) {
+#if HAS_LITTLEFS_QPINAND
+  if (!haveImuEstimate || flightState == FS_LANDED || flightState == FS_ABORT) return;
+  ensureLogOpen();
+  if (nandLogFile) {
+    NandAttitudeRecordV4 rec = {};
+    rec.type = NAND_RECORD_ATTITUDE_V4;
+    rec.size = sizeof(rec);
+    rec.sequence = nandRecordSequence++;
+    rec.ms = nowMs;
+    rec.qw_i16 = quantizeUnitI16(attitudeQw);
+    rec.qx_i16 = quantizeUnitI16(attitudeQx);
+    rec.qy_i16 = quantizeUnitI16(attitudeQy);
+    rec.qz_i16 = quantizeUnitI16(attitudeQz);
+    rec.roll_cdeg = (int16_t)lroundf(roll * 5729.57795f);
+    rec.pitch_cdeg = (int16_t)lroundf(pitch * 5729.57795f);
+    rec.yaw_cdeg = (int16_t)lroundf(yaw * 5729.57795f);
+    rec.diag_flags = diagFlags;
+    rec.state = (uint8_t)flightState;
+    rec.flags = 0;
+    if (attitudeAccelCorrectionActive) rec.flags |= 1u << 0;
+    if (attitudeMagCorrectionActive) rec.flags |= 1u << 1;
+    if (attitudeGyroOnly) rec.flags |= 1u << 2;
+    if (!appendNandRecord(&rec, sizeof(rec))) {
+      nandLogOk = false;
+      if (nandLogFile) nandLogFile.close();
+    }
+  }
+#else
+  (void)nowMs;
 #endif
   logOk = sdLogOk || nandLogOk || logsFinalized;
 }
@@ -1681,8 +2128,32 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
   char imuCsvName[52];
   snprintf(imuCsvName, sizeof(imuCsvName), "rocket_nand_%04lu_op%lu_imu.csv",
            (unsigned long)meta.flight_index, (unsigned long)operationId);
+  char baroCsvName[56];
+  snprintf(baroCsvName, sizeof(baroCsvName), "rocket_nand_%04lu_op%lu_baro.csv",
+           (unsigned long)meta.flight_index, (unsigned long)operationId);
+  char gpsCsvName[56];
+  snprintf(gpsCsvName, sizeof(gpsCsvName), "rocket_nand_%04lu_op%lu_gps.csv",
+           (unsigned long)meta.flight_index, (unsigned long)operationId);
+  char battCsvName[56];
+  snprintf(battCsvName, sizeof(battCsvName), "rocket_nand_%04lu_op%lu_batt.csv",
+           (unsigned long)meta.flight_index, (unsigned long)operationId);
+  char eventCsvName[58];
+  snprintf(eventCsvName, sizeof(eventCsvName), "rocket_nand_%04lu_op%lu_event.csv",
+           (unsigned long)meta.flight_index, (unsigned long)operationId);
+  char telemCsvName[58];
+  snprintf(telemCsvName, sizeof(telemCsvName), "rocket_nand_%04lu_op%lu_telem.csv",
+           (unsigned long)meta.flight_index, (unsigned long)operationId);
+  char attitudeCsvName[56];
+  snprintf(attitudeCsvName, sizeof(attitudeCsvName), "rocket_nand_%04lu_op%lu_att.csv",
+           (unsigned long)meta.flight_index, (unsigned long)operationId);
   SD.remove(csvName);
   SD.remove(imuCsvName);
+  SD.remove(baroCsvName);
+  SD.remove(gpsCsvName);
+  SD.remove(battCsvName);
+  SD.remove(eventCsvName);
+  SD.remove(telemCsvName);
+  SD.remove(attitudeCsvName);
   File dst = SD.open(csvName, FILE_WRITE);
   if (!dst) {
     if (SERIAL_DEBUG_LEVEL >= 1) {
@@ -1693,13 +2164,31 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
     return NAND_EXPORT_FAILED;
   }
   File imuDst;
+  File baroDst;
+  File gpsDst;
+  File battDst;
+  File eventDst;
+  File telemDst;
+  File attitudeDst;
   if (exportImu) {
     imuDst = SD.open(imuCsvName, FILE_WRITE);
-    if (!imuDst) {
+    baroDst = SD.open(baroCsvName, FILE_WRITE);
+    gpsDst = SD.open(gpsCsvName, FILE_WRITE);
+    battDst = SD.open(battCsvName, FILE_WRITE);
+    eventDst = SD.open(eventCsvName, FILE_WRITE);
+    telemDst = SD.open(telemCsvName, FILE_WRITE);
+    attitudeDst = SD.open(attitudeCsvName, FILE_WRITE);
+    if (!imuDst || !baroDst || !gpsDst || !battDst || !eventDst || !telemDst || !attitudeDst) {
       if (SERIAL_DEBUG_LEVEL >= 1) {
-        Serial.print("NAND export: open imu csv failed ");
-        Serial.println(imuCsvName);
+        Serial.println("NAND export: open detail csv failed");
       }
+      if (imuDst) imuDst.close();
+      if (baroDst) baroDst.close();
+      if (gpsDst) gpsDst.close();
+      if (battDst) battDst.close();
+      if (eventDst) eventDst.close();
+      if (telemDst) telemDst.close();
+      if (attitudeDst) attitudeDst.close();
       dst.close();
       src.close();
       return NAND_EXPORT_FAILED;
@@ -1711,15 +2200,62 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
     writeNandExportMetadata(imuDst, meta);
     imuDst.println("ms,seq,state,ax,ay,az,gx,gy,gz,roll,pitch,yaw");
   }
+  if (baroDst) {
+    writeNandExportMetadata(baroDst, meta);
+    baroDst.println("ms,seq,state,alt_m,rel_alt_m,vel_mps,temp_c,pres_pa,diag_flags");
+  }
+  if (gpsDst) {
+    writeNandExportMetadata(gpsDst, meta);
+    gpsDst.println("ms,seq,fix,sats,hdop,lat,lon,gps_alt_m,gps_rel_alt_m,baro_gps_delta_m,gps_speed_mps,fix_age_ms,chars_delta,pass_delta,fail_delta,flags");
+  }
+  if (battDst) {
+    writeNandExportMetadata(battDst, meta);
+    battDst.println("ms,seq,batt_v,raw_v,pin_v,pack,status_flags");
+  }
+  if (eventDst) {
+    writeNandExportMetadata(eventDst, meta);
+    eventDst.println("ms,seq,event_type,from_state,to_state,close_reason,flags,diag_flags,rel_alt_m,vel_mps,health");
+  }
+  if (telemDst) {
+    writeNandExportMetadata(telemDst, meta);
+    telemDst.println("ms,seq,packet_type,packet_seq,state,health,flight_seq,nav_seq,status_seq,identity_seq,last_rssi_dbm,batt_v");
+  }
+  if (attitudeDst) {
+    writeNandExportMetadata(attitudeDst, meta);
+    attitudeDst.println("ms,seq,state,qw,qx,qy,qz,roll,pitch,yaw,diag_flags,flags,accel_corr,mag_corr,gyro_only");
+  }
   dst.flush();
   if (imuDst) imuDst.flush();
+  if (baroDst) baroDst.flush();
+  if (gpsDst) gpsDst.flush();
+  if (battDst) battDst.flush();
+  if (eventDst) eventDst.flush();
+  if (telemDst) telemDst.flush();
+  if (attitudeDst) attitudeDst.flush();
   bool wroteFull = false;
   bool wroteImu = false;
+
+#define CLOSE_DETAIL_EXPORT_FILES() do { \
+  if (dst) dst.close(); \
+  if (imuDst) imuDst.close(); \
+  if (baroDst) baroDst.close(); \
+  if (gpsDst) gpsDst.close(); \
+  if (battDst) battDst.close(); \
+  if (eventDst) eventDst.close(); \
+  if (telemDst) telemDst.close(); \
+  if (attitudeDst) attitudeDst.close(); \
+} while (0)
 
   uint64_t offset = meta.header_size;
   uint32_t recordsRead = 0;
   uint32_t fullRows = 0;
   uint32_t imuRows = 0;
+  uint32_t baroRows = 0;
+  uint32_t gpsRows = 0;
+  uint32_t battRows = 0;
+  uint32_t eventRows = 0;
+  uint32_t telemRows = 0;
+  uint32_t attitudeRows = 0;
   uint32_t badTypeRows = 0;
   uint32_t implausibleRows = 0;
   while (offset + 2 <= fileSize && recordsRead < meta.record_count) {
@@ -1729,8 +2265,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
         Serial.print("NAND export: seek record failed offset=");
         Serial.println((unsigned long)offset);
       }
-      if (dst) dst.close();
-      if (imuDst) imuDst.close();
+      CLOSE_DETAIL_EXPORT_FILES();
       src.close();
       return NAND_EXPORT_FAILED;
     }
@@ -1741,8 +2276,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
         Serial.print("NAND export: record header read failed offset=");
         Serial.println((unsigned long)offset);
       }
-      if (dst) dst.close();
-      if (imuDst) imuDst.close();
+      CLOSE_DETAIL_EXPORT_FILES();
       src.close();
       return NAND_EXPORT_FAILED;
     }
@@ -1762,8 +2296,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
         Serial.print("NAND export: seek record body failed offset=");
         Serial.println((unsigned long)offset);
       }
-      if (dst) dst.close();
-      if (imuDst) imuDst.close();
+      CLOSE_DETAIL_EXPORT_FILES();
       src.close();
       return NAND_EXPORT_FAILED;
     }
@@ -1772,8 +2305,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
       NandFullStateRecordV4 wrapped = {};
       if (src.read((uint8_t *)&wrapped, sizeof(wrapped)) != (int)sizeof(wrapped)) {
         if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: full record read failed");
-        if (dst) dst.close();
-        if (imuDst) imuDst.close();
+        CLOSE_DETAIL_EXPORT_FILES();
         src.close();
         return NAND_EXPORT_FAILED;
       }
@@ -1837,8 +2369,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
       NandImuRecordV4 rec = {};
       if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
         if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: imu record read failed");
-        if (dst) dst.close();
-        if (imuDst) imuDst.close();
+        CLOSE_DETAIL_EXPORT_FILES();
         src.close();
         return NAND_EXPORT_FAILED;
       }
@@ -1867,6 +2398,265 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
       }
       if (exportImu) wroteImu = true;
       imuRows++;
+    } else if (type == NAND_RECORD_BARO_V4 && size == sizeof(NandBaroRecordV4)) {
+      NandBaroRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: baro record read failed");
+        if (dst) dst.close();
+        if (imuDst) imuDst.close();
+        if (baroDst) baroDst.close();
+        if (gpsDst) gpsDst.close();
+        if (battDst) battDst.close();
+        if (eventDst) eventDst.close();
+        if (telemDst) telemDst.close();
+        if (attitudeDst) attitudeDst.close();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (baroDst) {
+        char line[192];
+        snprintf(line, sizeof(line), "%lu,%u,%u,%.2f,%.2f,%.2f,%.2f,%.1f,%u",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 (unsigned int)rec.state,
+                 rec.alt_cm / 100.0f,
+                 rec.rel_alt_cm / 100.0f,
+                 rec.vel_cms / 100.0f,
+                 rec.temp_centi_c / 100.0f,
+                 rec.pressure_pa_x10 / 10.0f,
+                 (unsigned int)rec.diag_flags);
+        if (!baroDst.println(line)) {
+          if (dst) dst.close();
+          if (imuDst) imuDst.close();
+          baroDst.close();
+          if (gpsDst) gpsDst.close();
+          if (battDst) battDst.close();
+          if (eventDst) eventDst.close();
+          if (telemDst) telemDst.close();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      baroRows++;
+    } else if (type == NAND_RECORD_GPS_V4 && size == sizeof(NandGpsRecordV4)) {
+      NandGpsRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: gps record read failed");
+        if (dst) dst.close();
+        if (imuDst) imuDst.close();
+        if (baroDst) baroDst.close();
+        if (gpsDst) gpsDst.close();
+        if (battDst) battDst.close();
+        if (eventDst) eventDst.close();
+        if (telemDst) telemDst.close();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (gpsDst) {
+        const float gpsRelAlt = (rec.rel_alt_cm == INT32_MIN) ? NAN : rec.rel_alt_cm / 100.0f;
+        const float baroGpsDelta = (rec.baro_gps_delta_cm == INT32_MIN) ? NAN : rec.baro_gps_delta_cm / 100.0f;
+        char line[256];
+        snprintf(line, sizeof(line), "%lu,%u,%u,%u,%.1f,%.7f,%.7f,%.2f,%.2f,%.2f,%.2f,%lu,%u,%u,%u,%u",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 (unsigned int)rec.fix_type,
+                 (unsigned int)rec.sats,
+                 rec.hdop_x10 / 10.0f,
+                 rec.lat_e7 / 1e7,
+                 rec.lon_e7 / 1e7,
+                 rec.alt_cm / 100.0f,
+                 gpsRelAlt,
+                 baroGpsDelta,
+                 rec.speed_cms / 100.0f,
+                 (unsigned long)rec.fix_age_ms_x10 * 10UL,
+                 (unsigned int)rec.chars_delta,
+                 (unsigned int)rec.pass_delta,
+                 (unsigned int)rec.fail_delta,
+                 (unsigned int)rec.flags);
+        if (!gpsDst.println(line)) {
+          if (dst) dst.close();
+          if (imuDst) imuDst.close();
+          if (baroDst) baroDst.close();
+          gpsDst.close();
+          if (battDst) battDst.close();
+          if (eventDst) eventDst.close();
+          if (telemDst) telemDst.close();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      gpsRows++;
+    } else if (type == NAND_RECORD_BATT_V4 && size == sizeof(NandBatteryRecordV4)) {
+      NandBatteryRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: battery record read failed");
+        if (dst) dst.close();
+        if (imuDst) imuDst.close();
+        if (baroDst) baroDst.close();
+        if (gpsDst) gpsDst.close();
+        if (battDst) battDst.close();
+        if (eventDst) eventDst.close();
+        if (telemDst) telemDst.close();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (battDst) {
+        char line[128];
+        snprintf(line, sizeof(line), "%lu,%u,%.3f,%.3f,%.3f,%u,%u",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 rec.batt_mv / 1000.0f,
+                 rec.raw_mv / 1000.0f,
+                 rec.pin_mv / 1000.0f,
+                 (unsigned int)rec.pack,
+                 (unsigned int)rec.status_flags);
+        if (!battDst.println(line)) {
+          if (dst) dst.close();
+          if (imuDst) imuDst.close();
+          if (baroDst) baroDst.close();
+          if (gpsDst) gpsDst.close();
+          battDst.close();
+          if (eventDst) eventDst.close();
+          if (telemDst) telemDst.close();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      battRows++;
+    } else if (type == NAND_RECORD_EVENT_V4 && size == sizeof(NandEventRecordV4)) {
+      NandEventRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: event record read failed");
+        if (dst) dst.close();
+        if (imuDst) imuDst.close();
+        if (baroDst) baroDst.close();
+        if (gpsDst) gpsDst.close();
+        if (battDst) battDst.close();
+        if (eventDst) eventDst.close();
+        if (telemDst) telemDst.close();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (eventDst) {
+        char line[192];
+        snprintf(line, sizeof(line), "%lu,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f,%u",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 (unsigned int)rec.event_type,
+                 (unsigned int)rec.from_state,
+                 (unsigned int)rec.to_state,
+                 (unsigned int)rec.close_reason,
+                 (unsigned int)rec.flight_flags,
+                 (unsigned int)rec.diag_flags,
+                 rec.rel_alt_cm / 100.0f,
+                 rec.vel_cms / 100.0f,
+                 (unsigned int)rec.health_flags);
+        if (!eventDst.println(line)) {
+          if (dst) dst.close();
+          if (imuDst) imuDst.close();
+          if (baroDst) baroDst.close();
+          if (gpsDst) gpsDst.close();
+          if (battDst) battDst.close();
+          eventDst.close();
+          if (telemDst) telemDst.close();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      eventRows++;
+    } else if (type == NAND_RECORD_TELEM_V4 && size == sizeof(NandTelemetryRecordV4)) {
+      NandTelemetryRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: telemetry record read failed");
+        if (dst) dst.close();
+        if (imuDst) imuDst.close();
+        if (baroDst) baroDst.close();
+        if (gpsDst) gpsDst.close();
+        if (battDst) battDst.close();
+        if (eventDst) eventDst.close();
+        if (telemDst) telemDst.close();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (telemDst) {
+        char line[224];
+        snprintf(line, sizeof(line), "%lu,%u,%u,%lu,%u,%u,%lu,%lu,%lu,%lu,%d,%.3f",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 (unsigned int)rec.packet_type,
+                 (unsigned long)rec.packet_seq,
+                 (unsigned int)rec.state,
+                 (unsigned int)rec.health_flags,
+                 (unsigned long)rec.flight_seq,
+                 (unsigned long)rec.nav_seq,
+                 (unsigned long)rec.status_seq,
+                 (unsigned long)rec.identity_seq,
+                 (int)rec.last_rssi_dbm,
+                 rec.batt_mv / 1000.0f);
+        if (!telemDst.println(line)) {
+          if (dst) dst.close();
+          if (imuDst) imuDst.close();
+          if (baroDst) baroDst.close();
+          if (gpsDst) gpsDst.close();
+          if (battDst) battDst.close();
+          if (eventDst) eventDst.close();
+          telemDst.close();
+          if (attitudeDst) attitudeDst.close();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      telemRows++;
+    } else if (type == NAND_RECORD_ATTITUDE_V4 && size == sizeof(NandAttitudeRecordV4)) {
+      NandAttitudeRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: attitude record read failed");
+        if (dst) dst.close();
+        if (imuDst) imuDst.close();
+        if (baroDst) baroDst.close();
+        if (gpsDst) gpsDst.close();
+        if (battDst) battDst.close();
+        if (eventDst) eventDst.close();
+        if (telemDst) telemDst.close();
+        if (attitudeDst) attitudeDst.close();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (attitudeDst) {
+        const bool accelCorr = rec.flags & (1u << 0);
+        const bool magCorr = rec.flags & (1u << 1);
+        const bool gyroOnly = rec.flags & (1u << 2);
+        char line[224];
+        snprintf(line, sizeof(line), "%lu,%u,%u,%.6f,%.6f,%.6f,%.6f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%u",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 (unsigned int)rec.state,
+                 rec.qw_i16 / 32767.0f,
+                 rec.qx_i16 / 32767.0f,
+                 rec.qy_i16 / 32767.0f,
+                 rec.qz_i16 / 32767.0f,
+                 rec.roll_cdeg / 100.0f,
+                 rec.pitch_cdeg / 100.0f,
+                 rec.yaw_cdeg / 100.0f,
+                 (unsigned int)rec.diag_flags,
+                 (unsigned int)rec.flags,
+                 accelCorr ? 1u : 0u,
+                 magCorr ? 1u : 0u,
+                 gyroOnly ? 1u : 0u);
+        if (!attitudeDst.println(line)) {
+          if (dst) dst.close();
+          if (imuDst) imuDst.close();
+          if (baroDst) baroDst.close();
+          if (gpsDst) gpsDst.close();
+          if (battDst) battDst.close();
+          if (eventDst) eventDst.close();
+          if (telemDst) telemDst.close();
+          attitudeDst.close();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      attitudeRows++;
     } else {
       badTypeRows++;
       if (SERIAL_DEBUG_LEVEL >= 2 && badTypeRows <= 8) {
@@ -1889,6 +2679,8 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
       Serial.print((unsigned long)fullRows);
       Serial.print(" imu=");
       Serial.print((unsigned long)imuRows);
+      Serial.print(" att=");
+      Serial.print((unsigned long)attitudeRows);
       Serial.print(" bad=");
       Serial.print((unsigned long)badTypeRows);
       Serial.print(" implausible=");
@@ -1902,6 +2694,30 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
     imuDst.flush();
     imuDst.close();
   }
+  if (baroDst) {
+    baroDst.flush();
+    baroDst.close();
+  }
+  if (gpsDst) {
+    gpsDst.flush();
+    gpsDst.close();
+  }
+  if (battDst) {
+    battDst.flush();
+    battDst.close();
+  }
+  if (eventDst) {
+    eventDst.flush();
+    eventDst.close();
+  }
+  if (telemDst) {
+    telemDst.flush();
+    telemDst.close();
+  }
+  if (attitudeDst) {
+    attitudeDst.flush();
+    attitudeDst.close();
+  }
   src.close();
   if (SERIAL_DEBUG_LEVEL >= 1) {
     Serial.print("NAND export: done records=");
@@ -1910,6 +2726,18 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
     Serial.print((unsigned long)fullRows);
     Serial.print(" imu=");
     Serial.print((unsigned long)imuRows);
+    Serial.print(" baro=");
+    Serial.print((unsigned long)baroRows);
+    Serial.print(" gps=");
+    Serial.print((unsigned long)gpsRows);
+    Serial.print(" batt=");
+    Serial.print((unsigned long)battRows);
+    Serial.print(" event=");
+    Serial.print((unsigned long)eventRows);
+    Serial.print(" telem=");
+    Serial.print((unsigned long)telemRows);
+    Serial.print(" att=");
+    Serial.print((unsigned long)attitudeRows);
     Serial.print(" bad=");
     Serial.print((unsigned long)badTypeRows);
     Serial.print(" implausible=");
@@ -1919,6 +2747,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
     if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: no rows written, skipped");
     return NAND_EXPORT_SKIPPED;
   }
+#undef CLOSE_DETAIL_EXPORT_FILES
   return NAND_EXPORT_EXPORTED;
 }
 
@@ -2420,6 +3249,18 @@ static void printDebugStatus() {
   Serial.print(isImuFresh() ? "1" : "0");
   Serial.print(" baroFresh=");
   Serial.print(isBaroFresh() ? "1" : "0");
+  uint16_t launchWaitS = 0;
+  uint8_t launchStatus = currentLaunchStatus(launchWaitS);
+  Serial.print(" launchStatus=");
+  Serial.print((unsigned int)launchStatus);
+  Serial.print(" launchReady=");
+  Serial.print(launchStatus == LAUNCH_STATUS_READY ? "1" : "0");
+  Serial.print(" launchWaitS=");
+  Serial.print((unsigned int)launchWaitS);
+  Serial.print(" launchArmMs=");
+  Serial.print((unsigned long)launchArmedMs);
+  Serial.print(" launchStillMs=");
+  Serial.print((unsigned long)launchArmStillSinceMs);
   Serial.print(" logFinal=");
   Serial.println(logsFinalized ? "1" : "0");
 }
@@ -2483,6 +3324,10 @@ static void updateImu(float dt) {
   const float accMagG = sqrtf(ax_g * ax_g + ay_g * ay_g + az_g * az_g);
   const bool accelCorrectionOk = accMagG >= IMU_ACCEL_CORRECT_MIN_G &&
                                  accMagG <= IMU_ACCEL_CORRECT_MAX_G;
+  const float magMagUt = sqrtf(last_mx * last_mx + last_my * last_my + last_mz * last_mz);
+  const bool magCorrectionOk = accelCorrectionOk &&
+                               magMagUt >= IMU_MAG_CORRECT_MIN_UT &&
+                               magMagUt <= IMU_MAG_CORRECT_MAX_UT;
   float rollAcc = atan2f(ay_g, az_g);
   float pitchAcc = atan2f(-ax_g, sqrtf(ay_g * ay_g + az_g * az_g));
   const bool initializingEstimate = !haveImuEstimate;
@@ -2490,35 +3335,55 @@ static void updateImu(float dt) {
   if (initializingEstimate) {
     roll = rollAcc;
     pitch = pitchAcc;
+    const float cpInit = cosf(pitch);
+    const float spInit = sinf(pitch);
+    const float crInit = cosf(roll);
+    const float srInit = sinf(roll);
+    const float magXInit = last_mx * cpInit + last_mz * spInit;
+    const float magYInit = last_mx * srInit * spInit + last_my * crInit - last_mz * srInit * cpInit;
+    yaw = atan2f(-magYInit, magXInit);
+    setAttitudeQuatFromEuler(roll, pitch, yaw);
+    updateEulerFromAttitudeQuat();
     haveImuEstimate = true;
   } else {
-    const float rollGyro = wrapPi(roll + (last_gx * 0.017453293f) * dt);
-    const float pitchGyro = wrapPi(pitch + (last_gy * 0.017453293f) * dt);
+    integrateAttitudeQuatGyro(last_gx * 0.017453293f,
+                              last_gy * 0.017453293f,
+                              last_gz * 0.017453293f,
+                              dt);
+    updateEulerFromAttitudeQuat();
+
+    float correctedRoll = roll;
+    float correctedPitch = pitch;
+    float correctedYaw = yaw;
     if (accelCorrectionOk) {
-      roll = wrapPi(rollGyro + (1.0f - IMU_GYRO_ALPHA) * angleDelta(rollGyro, rollAcc));
-      pitch = wrapPi(pitchGyro + (1.0f - IMU_GYRO_ALPHA) * angleDelta(pitchGyro, pitchAcc));
-    } else {
-      roll = rollGyro;
-      pitch = pitchGyro;
+      correctedRoll = wrapPi(roll + (1.0f - IMU_GYRO_ALPHA) * angleDelta(roll, rollAcc));
+      correctedPitch = wrapPi(pitch + (1.0f - IMU_GYRO_ALPHA) * angleDelta(pitch, pitchAcc));
     }
+
+    if (magCorrectionOk) {
+      const float cp = cosf(correctedPitch);
+      const float sp = sinf(correctedPitch);
+      const float cr = cosf(correctedRoll);
+      const float sr = sinf(correctedRoll);
+      const float magX = last_mx * cp + last_mz * sp;
+      const float magY = last_mx * sr * sp + last_my * cr - last_mz * sr * cp;
+      const float yawMag = atan2f(-magY, magX);
+      correctedYaw = wrapPi(yaw + (1.0f - IMU_MAG_YAW_ALPHA) * angleDelta(yaw, yawMag));
+    }
+
+    setAttitudeQuatFromEuler(correctedRoll, correctedPitch, correctedYaw);
+    updateEulerFromAttitudeQuat();
   }
 
-  const float cp = cosf(pitch);
-  const float sp = sinf(pitch);
-  const float cr = cosf(roll);
-  const float sr = sinf(roll);
-  const float magX = last_mx * cp + last_mz * sp;
-  const float magY = last_mx * sr * sp + last_my * cr - last_mz * sr * cp;
-  const float yawMag = atan2f(-magY, magX);
-  if (initializingEstimate) {
-    yaw = yawMag;
-  } else {
-    yaw = wrapPi(yaw + (last_gz * 0.017453293f) * dt);
-    if (accelCorrectionOk) {
-      yaw = wrapPi(yaw + (1.0f - IMU_MAG_YAW_ALPHA) * angleDelta(yaw, yawMag));
-    }
-  }
-  if (yaw < 0.0f) yaw += 2.0f * PI;
+  attitudeAccelCorrectionActive = accelCorrectionOk;
+  attitudeMagCorrectionActive = magCorrectionOk;
+  attitudeGyroOnly = !accelCorrectionOk && !magCorrectionOk;
+  if (attitudeAccelCorrectionActive) diagFlags |= DIAG_ATT_ACCEL_CORR;
+  else diagFlags &= (uint16_t)~DIAG_ATT_ACCEL_CORR;
+  if (attitudeMagCorrectionActive) diagFlags |= DIAG_ATT_MAG_CORR;
+  else diagFlags &= (uint16_t)~DIAG_ATT_MAG_CORR;
+  if (attitudeGyroOnly) diagFlags |= DIAG_ATT_GYRO_ONLY;
+  else diagFlags &= (uint16_t)~DIAG_ATT_GYRO_ONLY;
 
   lastImuSampleMs = millis();
 #else
@@ -2554,6 +3419,7 @@ static void updateBaroAndState(float dt) {
     velZ = 0.0f;
     baseAltM = altM;
     padSettleStartMs = nowMs;
+    clearLaunchArmGate();
     resetRelAltHistory(nowMs, 0.0f);
     flightState = FS_PAD;
     return;
@@ -2591,10 +3457,27 @@ static void updateBaroAndState(float dt) {
                              ((relAlt - trendRelAltM) >= LAUNCH_TREND_MIN_M);
   const bool padSettled = padSettleStartMs != 0 &&
                           ((uint32_t)(nowMs - padSettleStartMs) >= LAUNCH_PAD_SETTLE_MS);
-  const bool launchCond = padSettled &&
-                          launchTrendOk &&
-                          (relAlt > LAUNCH_REL_ALT_M) &&
-                          (velZ > LAUNCH_VEL_MPS);
+  const bool launchStillCond = fabsf(accMagG - 1.0f) <= LAUNCH_PAD_STILL_ACCEL_ERR_G &&
+                               gyroMagDps <= LAUNCH_PAD_STILL_GYRO_DPS;
+  const bool powerOnInhibitDone = nowMs >= LAUNCH_POWERON_INHIBIT_MS;
+  const bool launchKinematicsCond = launchTrendOk &&
+                                    (relAlt > LAUNCH_REL_ALT_M) &&
+                                    (velZ > LAUNCH_VEL_MPS) &&
+                                    (accMagG >= LAUNCH_ACCEL_G);
+  if (flightState == FS_IDLE || flightState == FS_PAD) {
+    if (!powerOnInhibitDone || !padSettled) {
+      clearLaunchArmGate();
+    } else if (!launchArmed) {
+      if (conditionHeld(launchStillCond, nowMs, launchArmStillSinceMs, LAUNCH_PAD_STILL_ARM_MS)) {
+        setLaunchArmGate(nowMs, altM);
+        relAlt = currentBaroRelAltM();
+      }
+    } else if (!launchStillCond && !launchKinematicsCond) {
+      clearLaunchArmGate();
+    }
+  }
+  const bool launchReady = powerOnInhibitDone && padSettled && launchArmed;
+  const bool launchCond = launchReady && launchKinematicsCond;
   const bool coastCond = (velZ < COAST_VEL_MPS) && ((uint32_t)(nowMs - tLaunchMs) > COAST_MIN_AFTER_LAUNCH_MS);
   const bool apogeeCond = (velZ < APOGEE_VEL_MPS) && (relAlt > APOGEE_MIN_REL_ALT_M);
   const bool stillCond = fabsf(accMagG - 1.0f) <= LANDED_STILL_ACCEL_ERR_G &&
@@ -2687,6 +3570,7 @@ static bool sendFlightTelemetry() {
   pkt.roll_cdeg = (int16_t)lroundf(roll * 5729.57795f);
   pkt.pitch_cdeg = (int16_t)lroundf(pitch * 5729.57795f);
 
+  logNandTelemetryBinary(pkt.ms, PKT_TYPE_FLIGHT_V7, pkt.seq);
   loraTxBusy = true;
   LoRa.beginPacket();
   LoRa.write(PKT_TYPE_FLIGHT_V7);
@@ -2714,6 +3598,7 @@ static bool sendNavTelemetry() {
   pkt.baro_alt_cm = (int32_t)lroundf(filtAlt * 100.0f);
   pkt.last_fix_age_ms = haveGoodFix ? (millis() - lastFixTimeMs) : 0xFFFFFFFFu;
 
+  logNandTelemetryBinary(pkt.ms, PKT_TYPE_NAV_V7, pkt.seq);
   loraTxBusy = true;
   LoRa.beginPacket();
   LoRa.write(PKT_TYPE_NAV_V7);
@@ -2733,8 +3618,12 @@ static bool sendStatusTelemetry() {
   pkt.ms = millis();
   pkt.batt_mv = (uint16_t)lroundf(rocketBattV * 1000.0f);
   pkt.gps_sats = gpsSats;
+  uint16_t launchWaitS = 0;
+  pkt.launch_status = currentLaunchStatus(launchWaitS);
+  pkt.launch_wait_s = launchWaitS;
   pkt.last_rssi_dbm = 0;
 
+  logNandTelemetryBinary(pkt.ms, PKT_TYPE_STATUS_V8, pkt.seq);
   loraTxBusy = true;
   LoRa.beginPacket();
   LoRa.write(PKT_TYPE_STATUS_V8);
@@ -2755,6 +3644,7 @@ static bool sendIdentityTelemetry() {
   pkt.ms = millis();
   strncpy(pkt.name, rocketName, sizeof(pkt.name));
 
+  logNandTelemetryBinary(pkt.ms, PKT_TYPE_IDENTITY_V1, pkt.seq);
   loraTxBusy = true;
   LoRa.beginPacket();
   LoRa.write(PKT_TYPE_IDENTITY_V1);
@@ -2828,6 +3718,7 @@ static void storageTask() {
   const uint32_t nandLogPeriodMs = recoveryMode ? RECOVERY_NAND_LOG_UPDATE_MS : NAND_LOG_UPDATE_MS;
 
   if (flightState != lastFlightState) {
+    logNandEventBinary(nowMs, 1, lastFlightState, flightState, NAND_CLOSE_NONE);
     if (flightState == FS_ABORT) {
       finalizeLogFiles(NAND_CLOSE_ABORT);
     }
@@ -2899,6 +3790,7 @@ void loop() {
   uint32_t nowMs = millis();
   if (taskDue(nowMs, lastBattMs, BATT_UPDATE_MS)) {
     sampleBatteryTask();
+    logNandBatteryBinary(nowMs);
   }
 
   if (taskDue(nowMs, lastImuMs, IMU_UPDATE_MS)) {
@@ -2906,6 +3798,7 @@ void loop() {
     sampleImuTask(dtImu);
     if (taskDue(nowMs, lastNandImuLogMs, NAND_IMU_LOG_UPDATE_MS)) {
       logNandImuBinary(nowMs);
+      logNandAttitudeBinary(nowMs);
     }
   }
 
@@ -2914,7 +3807,10 @@ void loop() {
     if (dtBaro <= 0.0f || dtBaro > 0.25f) dtBaro = BARO_UPDATE_MS / 1000.0f;
     lastBaroMs = nowMs;
     sampleBaroTask(dtBaro);
+    if (isBaroFresh()) logNandBaroBinary(nowMs);
   }
+
+  logNandGpsBinary(nowMs);
 
   telemetryTask();
   storageTask();
