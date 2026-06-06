@@ -49,6 +49,15 @@ static uint32_t m_tStartB=0;
 static bool prevDesiredA=false;
 static bool prevDesiredB=false;
 
+static bool pwrFireLogActive=false;
+static uint32_t pwrFireLogStartMs=0;
+static uint32_t pwrFireLogLastMs=0;
+static uint16_t pwrFireLogEvent=0;
+static uint16_t pwrFireLogSample=0;
+static float pwrFirePeakA=0.0f;
+static float pwrFirePeakB=0.0f;
+static char pwrFireEventName[8] = "NONE";
+
 bool power_link_fresh() {
     return (millis() - lastStatusMs) < LINK_FRESH_MS;
 }
@@ -137,6 +146,88 @@ static void logPowerStartEvent(const char *eventName,
            pwr_onB ? 1 : 0,
            power_link_fresh() ? 1 : 0);
   sdlog_write(line);
+}
+
+static void beginPowerFireLog(const char *eventName) {
+  pwrFireLogActive = true;
+  pwrFireLogStartMs = millis();
+  pwrFireLogLastMs = 0;
+  pwrFireLogEvent++;
+  pwrFireLogSample = 0;
+  pwrFirePeakA = 0.0f;
+  pwrFirePeakB = 0.0f;
+  strncpy(pwrFireEventName, eventName, sizeof(pwrFireEventName) - 1);
+  pwrFireEventName[sizeof(pwrFireEventName) - 1] = '\0';
+}
+
+static void logPowerFireSample(bool armA_sw,
+                               bool startA_btn,
+                               bool startA_ok,
+                               bool armB_sw,
+                               bool startB_btn,
+                               bool startB_ok) {
+  const float ia = pwr_ia_x10 / 10.0f;
+  const float ib = pwr_ib_x10 / 10.0f;
+  if (ia > pwrFirePeakA) pwrFirePeakA = ia;
+  if (ib > pwrFirePeakB) pwrFirePeakB = ib;
+
+  char line[320];
+  snprintf(line, sizeof(line),
+           "PWR_FIRE,event=%s,id=%u,sample=%u,ms=%lu,dt_ms=%lu,"
+           "ign_v=%.1f,gnd_v=%.2f,ia=%.1f,ib=%.1f,peak_ia=%.1f,peak_ib=%.1f,"
+           "key=%d,presA=%d,presB=%d,fault=%d,"
+           "armA_sw=%d,startA_btn=%d,startA_ok=%d,armA_seen=%d,onA=%d,"
+           "armB_sw=%d,startB_btn=%d,startB_ok=%d,armB_seen=%d,onB=%d,"
+           "link=%d,rx_rate=%u",
+           pwrFireEventName,
+           (unsigned int)pwrFireLogEvent,
+           (unsigned int)pwrFireLogSample++,
+           (unsigned long)millis(),
+           (unsigned long)(millis() - pwrFireLogStartMs),
+           pwr_vbat_x10 / 10.0f,
+           pwr_localVbat,
+           ia,
+           ib,
+           pwrFirePeakA,
+           pwrFirePeakB,
+           pwr_key_ok ? 1 : 0,
+           pwr_presA ? 1 : 0,
+           pwr_presB ? 1 : 0,
+           pwr_faultAny ? 1 : 0,
+           armA_sw ? 1 : 0,
+           startA_btn ? 1 : 0,
+           startA_ok ? 1 : 0,
+           pwr_armA_seen ? 1 : 0,
+           pwr_onA ? 1 : 0,
+           armB_sw ? 1 : 0,
+           startB_btn ? 1 : 0,
+           startB_ok ? 1 : 0,
+           pwr_armB_seen ? 1 : 0,
+           pwr_onB ? 1 : 0,
+           power_link_fresh() ? 1 : 0,
+           (unsigned int)pwr_rxRate);
+  sdlog_write_now(line);
+}
+
+static void updatePowerFireLog(bool armA_sw,
+                               bool startA_btn,
+                               bool startA_ok,
+                               bool armB_sw,
+                               bool startB_btn,
+                               bool startB_ok) {
+  if (!pwrFireLogActive) return;
+
+  const uint32_t now = millis();
+  if ((uint32_t)(now - pwrFireLogStartMs) > PWR_FIRE_LOG_WINDOW_MS) {
+    pwrFireLogActive = false;
+    return;
+  }
+
+  if (pwrFireLogLastMs == 0 ||
+      (uint32_t)(now - pwrFireLogLastMs) >= PWR_FIRE_LOG_MS) {
+    pwrFireLogLastMs = now;
+    logPowerFireSample(armA_sw, startA_btn, startA_ok, armB_sw, startB_btn, startB_ok);
+  }
 }
 
 static void serviceRx(){
@@ -277,12 +368,16 @@ void power_update() {
 
   if (startA_btn && !prevStartAButton) {
     logPowerStartEvent("A_PRESS", armA_sw, startA_btn, startA_ok, armB_sw, startB_btn, startB_ok);
+    beginPowerFireLog(startB_btn ? "AB" : "A");
   }
   if (startB_btn && !prevStartBButton) {
     logPowerStartEvent("B_PRESS", armA_sw, startA_btn, startA_ok, armB_sw, startB_btn, startB_ok);
+    beginPowerFireLog(startA_btn ? "AB" : "B");
   }
   prevStartAButton = startA_btn;
   prevStartBButton = startB_btn;
+
+  updatePowerFireLog(armA_sw, startA_btn, startA_ok, armB_sw, startB_btn, startB_ok);
 
   prevDesiredA = desiredA;
   prevDesiredB = desiredB;

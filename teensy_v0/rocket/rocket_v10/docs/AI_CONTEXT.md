@@ -40,6 +40,18 @@ Important connections:
 - External status LED:
   - `pin 3`
   - `pin 3 -> 330R -> LED anode`, LED cathode to `GND`
+- Finder buzzer:
+  - `pin 5`
+  - small piezo buzzer to `GND`, or transistor/MOSFET driver for a louder buzzer
+  - rising ready melody after successful initialization
+  - falling warning melody when required hardware init fails
+  - staged landed finder beacon after `FS_LANDED`: frequent for 3 minutes, slower until 10 minutes, then slow single long beeps
+- Local service button:
+  - `pin 4`
+  - momentary switch to `GND`, active-low with `INPUT_PULLUP`
+  - short press silences the landed finder beep
+  - hold for about 2 seconds to close the current log, re-baseline on the pad, prepare for the next flight attempt, and play a confirmation melody
+  - reset is refused during active ascent/coast/descent
 
 ## Current v10 status
 

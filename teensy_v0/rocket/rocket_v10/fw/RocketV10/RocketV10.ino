@@ -572,6 +572,13 @@ bool serviceModeFailed = false;
 
 LedMode ledMode = LED_MODE_BOOT;
 uint32_t ledModeSinceMs = 0;
+bool finderBeeperActive = false;
+bool buttonPrevPressed = false;
+bool buttonResetFired = false;
+uint32_t buttonDownMs = 0;
+uint32_t finderBeeperStartMs = 0;
+uint32_t beepPatternStartMs = 0;
+uint8_t beepPattern = 0;
 
 File sdLogFile;
 File nandLogFile;
@@ -1017,6 +1024,10 @@ static void updateLedModeFromHealth() {
   }
 }
 
+static bool startupHardwareOk() {
+  return nandOk && sdOk && baroOk && imuOk && loraOk;
+}
+
 static void updateStatusLed() {
   static uint32_t lastLedMs = 0;
   const uint32_t nowMs = millis();
@@ -1059,6 +1070,122 @@ static void updateStatusLed() {
   }
 
   writeStatusLed(on);
+}
+
+static void buzzerWrite(bool on, uint16_t freqHz = 2400) {
+#if BUZZER_USE_TONE
+  if (on) tone(BUZZER_PIN, freqHz);
+  else noTone(BUZZER_PIN);
+#else
+  (void)freqHz;
+  digitalWrite(BUZZER_PIN, on ? HIGH : LOW);
+#endif
+}
+
+static void startBeepPattern(uint8_t pattern) {
+  beepPattern = pattern;
+  beepPatternStartMs = millis();
+}
+
+static void playBlockingTone(uint16_t durationMs, uint16_t freqHz, uint16_t pauseMs = 0) {
+  buzzerWrite(true, freqHz);
+  delay(durationMs);
+  buzzerWrite(false);
+  if (pauseMs > 0) delay(pauseMs);
+}
+
+static void playStartupSound(bool ok) {
+  if (ok) {
+    playBlockingTone(180, 2200, 120);
+    playBlockingTone(180, 2700, 120);
+    playBlockingTone(320, 3300, 0);
+  } else {
+    playBlockingTone(260, 2200, 160);
+    playBlockingTone(260, 1500, 160);
+    playBlockingTone(600, 900, 0);
+  }
+}
+
+static bool noteActive(uint32_t t, uint32_t startMs, uint32_t durationMs) {
+  return t >= startMs && t < (startMs + durationMs);
+}
+
+static void setFinderBeeper(bool active) {
+  finderBeeperActive = active;
+  if (active) finderBeeperStartMs = millis();
+  else buzzerWrite(false);
+}
+
+static uint32_t landedFinderPeriodMs(uint32_t activeMs) {
+  if (activeMs < LANDED_FINDER_FAST_MS) return LANDED_FINDER_FAST_PERIOD_MS;
+  if (activeMs < LANDED_FINDER_MEDIUM_MS) return LANDED_FINDER_MEDIUM_PERIOD_MS;
+  return LANDED_FINDER_SLOW_PERIOD_MS;
+}
+
+static void landedFinderSignal(uint32_t activeMs, bool &on, uint16_t &freq) {
+  const uint32_t periodMs = landedFinderPeriodMs(activeMs);
+  const uint32_t phase = activeMs % periodMs;
+
+  if (activeMs < LANDED_FINDER_FAST_MS) {
+    on = noteActive(phase, 0u, 320u) || noteActive(phase, 520u, 320u) || noteActive(phase, 1040u, 520u);
+    freq = noteActive(phase, 1040u, 520u) ? 3000 : 2200;
+  } else if (activeMs < LANDED_FINDER_MEDIUM_MS) {
+    on = noteActive(phase, 0u, 450u) || noteActive(phase, 700u, 450u);
+    freq = noteActive(phase, 700u, 450u) ? 2600 : 1800;
+  } else {
+    on = noteActive(phase, 0u, 900u);
+    freq = 1800;
+  }
+}
+
+static void updateBuzzer() {
+  const uint32_t nowMs = millis();
+  bool on = false;
+  uint16_t freq = 2400;
+
+  if (beepPattern != 0) {
+    const uint32_t t = nowMs - beepPatternStartMs;
+    switch (beepPattern) {
+      case 1: // boot OK: rising "ready" melody
+        on = noteActive(t, 0u, 180u) || noteActive(t, 280u, 180u) || noteActive(t, 560u, 260u);
+        if (noteActive(t, 0u, 180u)) freq = 2200;
+        else if (noteActive(t, 280u, 180u)) freq = 2700;
+        else freq = 3300;
+        if (t >= 980u) beepPattern = 0;
+        break;
+      case 2: // button reset accepted: clear rising confirmation
+        on = noteActive(t, 0u, 160u) || noteActive(t, 260u, 160u) || noteActive(t, 520u, 320u);
+        if (noteActive(t, 0u, 160u)) freq = 1800;
+        else if (noteActive(t, 260u, 160u)) freq = 2400;
+        else freq = 3200;
+        if (t >= 1000u) beepPattern = 0;
+        break;
+      case 3: // button reset refused during active flight: low warning
+        on = noteActive(t, 0u, 420u) || noteActive(t, 620u, 420u);
+        freq = 850;
+        if (t >= 1250u) beepPattern = 0;
+        break;
+      case 4: // startup failure: falling warning
+        on = noteActive(t, 0u, 260u) || noteActive(t, 420u, 260u) ||
+             noteActive(t, 840u, 520u);
+        if (noteActive(t, 0u, 260u)) freq = 2200;
+        else if (noteActive(t, 420u, 260u)) freq = 1500;
+        else freq = 900;
+        if (t >= 1600u) beepPattern = 0;
+        break;
+      default:
+        beepPattern = 0;
+        break;
+    }
+  }
+
+#if LANDED_FINDER_BEEP_ENABLE
+  if (beepPattern == 0 && finderBeeperActive) {
+    landedFinderSignal(nowMs - finderBeeperStartMs, on, freq);
+  }
+#endif
+
+  buzzerWrite(on, freq);
 }
 
 void onLoraTxDone() {
@@ -1287,6 +1414,89 @@ static void finalizeLogFiles(NandCloseReason closeReason) {
 
   logOk = true;
   logsFinalized = true;
+}
+
+static bool flightStateAllowsButtonReset() {
+  return flightState == FS_IDLE || flightState == FS_PAD ||
+         flightState == FS_LANDED || flightState == FS_ABORT;
+}
+
+static void resetForNextFlightFromButton() {
+  const uint32_t nowMs = millis();
+  finalizeLogFiles(NAND_CLOSE_SERVICE);
+
+  flightState = haveAlt ? FS_PAD : FS_IDLE;
+  lastFlightState = flightState;
+  flightFlags = 0;
+  tLaunchMs = 0;
+  tApogeeMs = 0;
+  maxAltM = 0.0f;
+  maxVelMps = 0.0f;
+  apogeeAltM = NAN;
+  launchDetectSinceMs = 0;
+  coastDetectSinceMs = 0;
+  apogeeDetectSinceMs = 0;
+  landedDetectSinceMs = 0;
+  landedStillSinceMs = 0;
+  setFinderBeeper(false);
+
+  if (haveAlt) {
+    baseAltM = filtAlt;
+    velRefAltM = filtAlt;
+    velRefMs = nowMs;
+    velZ = 0.0f;
+    padSettleStartMs = nowMs;
+    resetRelAltHistory(nowMs, 0.0f);
+  }
+  clearLaunchArmGate();
+
+  haveGpsBaseAlt = false;
+  gpsBaseAltM = NAN;
+  gpsRelAltM = 0.0f;
+  baroGpsDeltaM = NAN;
+  baroGpsDiverged = false;
+
+  logsFinalized = false;
+  logOk = sdOk || nandOk;
+  startBeepPattern(2);
+
+  if (SERIAL_DEBUG_LEVEL >= 1) {
+    Serial.println("RocketV10 button reset: prepared for next flight");
+  }
+}
+
+static void updateButtonTask() {
+  const bool rawPressed =
+#if BUTTON_ACTIVE_LOW
+    digitalRead(BUTTON_PIN) == LOW;
+#else
+    digitalRead(BUTTON_PIN) == HIGH;
+#endif
+
+  const uint32_t nowMs = millis();
+  if (rawPressed && !buttonPrevPressed) {
+    buttonDownMs = nowMs;
+    buttonResetFired = false;
+  }
+
+  if (rawPressed && !buttonResetFired &&
+      (uint32_t)(nowMs - buttonDownMs) >= BUTTON_RESET_HOLD_MS) {
+    if (flightStateAllowsButtonReset()) {
+      resetForNextFlightFromButton();
+    } else {
+      startBeepPattern(3);
+    }
+    buttonResetFired = true;
+  }
+
+  if (!rawPressed && buttonPrevPressed) {
+    if (!buttonResetFired) {
+      setFinderBeeper(false);
+      buzzerWrite(false);
+    }
+    buttonResetFired = false;
+  }
+  buttonPrevPressed = rawPressed;
 }
 
 static void ensureLogOpen() {
@@ -3719,7 +3929,10 @@ static void storageTask() {
 
   if (flightState != lastFlightState) {
     logNandEventBinary(nowMs, 1, lastFlightState, flightState, NAND_CLOSE_NONE);
-    if (flightState == FS_ABORT) {
+    if (flightState == FS_LANDED) {
+      setFinderBeeper(true);
+      finalizeLogFiles(NAND_CLOSE_LANDED);
+    } else if (flightState == FS_ABORT) {
       finalizeLogFiles(NAND_CLOSE_ABORT);
     }
     lastFlightState = flightState;
@@ -3753,6 +3966,13 @@ void setup() {
   pinMode(STATUS_LED_PIN, OUTPUT);
   writeStatusLed(false);
   setLedMode(LED_MODE_BOOT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  buzzerWrite(false);
+#if BUTTON_ACTIVE_LOW
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+#else
+  pinMode(BUTTON_PIN, INPUT_PULLDOWN);
+#endif
 
   Wire.begin();
   GPS_SERIAL.begin(GPS_BAUD, SERIAL_8N1);
@@ -3770,6 +3990,7 @@ void setup() {
 
   sampleBatteryTask();
   updateLedModeFromHealth();
+  playStartupSound(startupHardwareOk());
 
   if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("RocketV10 ready");
 }
@@ -3814,7 +4035,9 @@ void loop() {
 
   telemetryTask();
   storageTask();
+  updateButtonTask();
   serialDebugTask();
   updateLedModeFromHealth();
   updateStatusLed();
+  updateBuzzer();
 }

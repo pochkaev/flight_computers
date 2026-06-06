@@ -499,6 +499,7 @@ Shown when no rocket packets have been received yet, or when selected manually.
 ### `[READY]`
 
 Shown automatically when rocket packets are present and the rocket has not launched.
+The blue header shows `[ROCKET]` on the left and the rocket name on the right.
 
 | Field | Meaning |
 |---|---|
@@ -594,16 +595,23 @@ Manual diagnostic page for link and navigation quality.
 
 ## SD logging behavior
 
-Ground logs rich snapshot rows after the first rocket packet has been received.
+Ground logs sparse ground-only rows independently of rocket packets, plus richer rocket snapshot rows after the first rocket packet has been received.
 
 Current cadence:
 
-- before first rocket packet: no repeated PAD rows
+- ground-only: `GND` row every `GROUND_LOG_MS` (`30 s`), including sessions where no rocket computer is present
+- before first rocket packet: no repeated `PAD` rows
 - preflight with rocket link: `PAD` row every `PAD_PRELOG_MS` (`5 s`)
 - flight: `FLG` row every `FLIGHT_LOG_MS` (`200 ms`)
 - recovery: `NAV` row every `RECOVERY_LOG_MS` (`1 s`)
 - lost link after rocket was seen: `LOST` row every `PAD_LOSTLOG_MS` (`30 s`)
 
-Rows include rocket state, altitude, velocity, GPS, ground GPS/baro, distance/bearing, RSSI, packet ages, receive/miss counts, rocket battery, rocket health, and ground GPS parser counters.
+`GND` rows include ground GPS, BMP180 barometric altitude, BMP180 temperature, ground GPS parser counters, ground-module battery voltage, power-module ignition voltage/current/status, RS-485 link status, and whether a rocket packet has ever been seen.
+
+Rocket snapshot rows include rocket state, altitude, velocity, GPS, ground GPS/baro/temperature, distance/bearing, RSSI, packet ages, receive/miss counts, rocket battery, rocket health, and ground GPS parser counters.
 
 Power-module logging is intentionally sparse. Normal RS-485 status frames are used for the screen but are not written repeatedly to SD. A `PWR_START` row is written only on the rising edge of Start A or Start B. It includes the event name, timestamp, ignition voltage, ground-module voltage, channel currents, key/presence/fault state, local arm/start state, power-module arm/on state, and RS-485 link freshness.
+
+After a Start A or Start B press, the ground station also writes `PWR_FIRE` rows every `PWR_FIRE_LOG_MS` (`100 ms`) for `PWR_FIRE_LOG_WINDOW_MS` (`3 s`). These rows capture the latest RS-485 power-module status during ignition and include `ia`, `ib`, and the ground-observed `peak_ia` / `peak_ib` over that 3 second window.
+
+Power-module current note: the existing power-module firmware reports live channel current while a lane is armed normally. If a lane enters overcurrent/short fault, the same current field reports the power module's stored fault peak. The ground station does not change power-module firmware; it logs the values available on the existing RS-485 status protocol.

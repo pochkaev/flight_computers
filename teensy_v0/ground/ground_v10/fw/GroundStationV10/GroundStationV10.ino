@@ -11,6 +11,7 @@ static uint32_t lastPadLogMs = 0;
 static uint32_t lastLostLogMs = 0;
 static uint32_t lastFlightLogMs = 0;
 static uint32_t lastRecoveryLogMs = 0;
+static uint32_t lastGroundLogMs = 0;
 
 static const char *phaseName(FlightPhase ph) {
     switch (ph) {
@@ -58,7 +59,7 @@ void log_snapshot(const char *type, FlightPhase ph) {
         "%s,ms=%lu,phase=%s,rocket_state=%s,flags=%u,"
         "rkt_alt_baro=%.1f,rkt_rel_alt=%.1f,rkt_vel=%.1f,"
         "rkt_lat=%.6f,rkt_lon=%.6f,rkt_gps_alt=%.1f,rkt_fix=%u,rkt_sats=%u,rkt_hdop=%.1f,"
-        "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
+        "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_temp_c=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
         "distance_m=%.1f,bearing_deg=%.1f,"
         "rssi_f=%d,rssi_n=%d,rssi_s=%d,rssi_last=%d,"
         "age_f=%.1f,age_n=%.1f,age_s=%.1f,age_last=%.1f,"
@@ -85,6 +86,7 @@ void log_snapshot(const char *type, FlightPhase ph) {
         gndLon,
         gndAltGpsM,
         gndAltBaroM,
+        gndTempC,
         (unsigned int)gndSats,
         gndHdop,
         distanceToRocketM,
@@ -122,6 +124,66 @@ void log_snapshot(const char *type, FlightPhase ph) {
         gndGpsLocValid ? 1u : 0u
     );
     sdlog_write(line);
+}
+
+void log_ground() {
+    char line[512];
+#if ENABLE_POWER_MODULE
+    snprintf(line, sizeof(line),
+        "GND,ms=%lu,"
+        "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_temp_c=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
+        "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u,"
+        "gnd_v=%.2f,ign_v=%.1f,ia=%.1f,ib=%.1f,"
+        "pwr_key=%u,presA=%u,presB=%u,fault=%u,onA=%u,onB=%u,pwr_link=%u,pwr_rx_rate=%u,"
+        "rocket_seen=%u,rocket_age_s=%.1f",
+        (unsigned long)millis(),
+        gndLat,
+        gndLon,
+        gndAltGpsM,
+        gndAltBaroM,
+        gndTempC,
+        (unsigned int)gndSats,
+        gndHdop,
+        (unsigned long)gndGpsChars,
+        (unsigned long)gndGpsPassed,
+        (unsigned long)gndGpsFailed,
+        gndGpsLocValid ? 1u : 0u,
+        pwr_localVbat,
+        pwr_vbat_x10 / 10.0f,
+        pwr_ia_x10 / 10.0f,
+        pwr_ib_x10 / 10.0f,
+        pwr_key_ok ? 1u : 0u,
+        pwr_presA ? 1u : 0u,
+        pwr_presB ? 1u : 0u,
+        pwr_faultAny ? 1u : 0u,
+        pwr_onA ? 1u : 0u,
+        pwr_onB ? 1u : 0u,
+        power_link_fresh() ? 1u : 0u,
+        (unsigned int)pwr_rxRate,
+        rocketLastPacketMs != 0 ? 1u : 0u,
+        ageSeconds(rocketLastPacketMs));
+#else
+    snprintf(line, sizeof(line),
+        "GND,ms=%lu,"
+        "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_temp_c=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
+        "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u,"
+        "rocket_seen=%u,rocket_age_s=%.1f",
+        (unsigned long)millis(),
+        gndLat,
+        gndLon,
+        gndAltGpsM,
+        gndAltBaroM,
+        gndTempC,
+        (unsigned int)gndSats,
+        gndHdop,
+        (unsigned long)gndGpsChars,
+        (unsigned long)gndGpsPassed,
+        (unsigned long)gndGpsFailed,
+        gndGpsLocValid ? 1u : 0u,
+        rocketLastPacketMs != 0 ? 1u : 0u,
+        ageSeconds(rocketLastPacketMs));
+#endif
+    sdlog_write_now(line);
 }
 
 void log_pad() {
@@ -172,6 +234,11 @@ void loop() {
     uint32_t now = millis();
     static FlightPhase lastPhase = PHASE_PREFLIGHT;
     FlightPhase ph = radio_getPhase();
+
+    if (lastGroundLogMs == 0 || now - lastGroundLogMs > GROUND_LOG_MS) {
+        lastGroundLogMs = now;
+        log_ground();
+    }
 
     if (ph != lastPhase) {
         DBG1(String("PHASE → ") + String(ph));

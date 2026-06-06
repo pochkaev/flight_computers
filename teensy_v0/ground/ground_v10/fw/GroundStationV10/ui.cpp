@@ -405,7 +405,7 @@ static void drawPreflight() {
 }
 
 static void drawRocketStatus() {
-    drawHeader("[READY]", nullptr, pageChangedThisFrame);
+    drawHeader("[ROCKET]", rocketName, true);
     if (pageChangedThisFrame) clearPageBody();
 
     float relAlt = rocketRelAltM();

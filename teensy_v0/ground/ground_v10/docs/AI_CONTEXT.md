@@ -263,6 +263,7 @@ Changes made:
 - rate-limited ground logging:
   - `FLIGHT_LOG_MS = 200`
   - `RECOVERY_LOG_MS = 1000`
+- ground snapshot rows include `gnd_temp_c` from the BMP180 temperature reading
 - repeated RS-485 power-module status rows are not written to SD
 - `PWR_START` is written only on a Start A or Start B press edge and includes timestamp, ignition voltage, local ground voltage, channel currents, key/presence/fault state, local switch/button state, power-module arm/on state, and link freshness
 

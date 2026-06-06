@@ -12,6 +12,7 @@ extern bool sdlog_hasGpsTime;
 
 void sdlog_init();
 void sdlog_write(const char *line);
+void sdlog_write_now(const char *line);
 void sdlog_close();
 void sdlog_ensureFile();
 void sdlog_onGpsTimeAvailable();

@@ -56,6 +56,9 @@
 #define PAD_LOSTLOG_MS     30000      // Logging when signal lost
 #define FLIGHT_LOG_MS      200        // Flight log cadence
 #define RECOVERY_LOG_MS    1000       // Recovery log cadence
+#define GROUND_LOG_MS      30000      // Independent ground-only log cadence
+#define PWR_FIRE_LOG_MS    100        // High-rate power samples after START
+#define PWR_FIRE_LOG_WINDOW_MS 3000   // Duration of high-rate power samples
 
 // Display
 #define UI_UPDATE_MS       250        // Refresh rate (ms)
@@ -108,7 +111,7 @@
 // 0 = disabled for field use
 // 1 = boot + important status messages
 // 2 = verbose packet/status debug for bench work
-#define SERIAL_DEBUG_LEVEL 2
+#define SERIAL_DEBUG_LEVEL 0
 
 // Enable / disable RS-485 power module integration (1=on, 0=off)
 #define ENABLE_POWER_MODULE 1

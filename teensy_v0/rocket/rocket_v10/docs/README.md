@@ -130,6 +130,42 @@ LED patterns:
 - 3 short blinks repeating: NAND failure
 - fast 250 ms blink: general hardware fault
 
+## Buzzer and service button
+
+Dedicated rocket finder/service pins:
+
+- `BUZZER_PIN = 5`
+- `BUTTON_PIN = 4`
+
+Recommended buzzer wiring for a small piezo buzzer:
+
+```text
+Teensy pin 5 -> buzzer +
+buzzer - -> GND
+```
+
+Use a small active or passive piezo buzzer only if its current draw is safe for a Teensy GPIO pin. For a louder buzzer, connect `D5` to a small NPN transistor or MOSFET driver and power the buzzer from the rocket battery/regulator.
+
+Recommended button wiring:
+
+```text
+Teensy pin 4 -> momentary button -> GND
+```
+
+The firmware uses `INPUT_PULLUP`, so the button is active-low.
+
+Buzzer behavior:
+
+- boot success: rising ready melody after LoRa, storage, baro, and IMU initialize
+- boot failure: falling warning melody if one of the required devices fails initialization
+- landed: staged finder beacon
+  - first 3 minutes: frequent longer beacon pattern for easy recovery
+  - 3 to 10 minutes: slower double-beep beacon
+  - after 10 minutes: slow single long beep to save battery
+- short button press: silence the landed finder beep
+- long button press, about 2 seconds: close the current log, reset flight state, refresh the current pad baseline, prepare for the next flight attempt, and play a rising confirmation melody
+- long button press is ignored during `ASCENT`, `COAST`, and `DESCENT`
+
 ## Electrical notes
 
 - The firmware should be documented as a `Teensy 4.1` build.
@@ -221,6 +257,9 @@ Rules:
 | LoRa RST | D9 | RFM95 `RST` | Active-low reset |
 | LoRa DIO0 | D2 | RFM95 `DIO0` | LoRa interrupt |
 | LoRa SPI | D11 / D12 / D13 | RFM95 `MOSI` / `MISO` / `SCK` | Teensy hardware SPI |
+| Status LED | D3 | LED + resistor to GND | External status LED |
+| Finder buzzer | D5 | Piezo buzzer or transistor driver | Beeps at boot and after landed |
+| Service button | D4 | Momentary switch to GND | Short press silences beep; long press resets for next attempt |
 | GPS RX | D0 (`Serial1 RX`) | GT-U7 `TX` | `9600` baud |
 | GPS TX | D1 (`Serial1 TX`) | GT-U7 `RX` | Optional |
 | I2C SDA | D18 | MS5607 `SDA`, LSM9DS1 `SDA` | Shared I2C bus |

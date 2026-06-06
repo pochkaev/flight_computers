@@ -13,6 +13,7 @@ uint32_t currentLogIndex = 0;
 
 static uint32_t bootTimeMs = 0;
 static bool stampedMode = false;
+static bool forceOpenWithoutGpsTime = false;
 
 // Buffered logging to reduce SD flush overhead
 static char     logBuf[512];
@@ -184,7 +185,7 @@ void sdlog_ensureFile() {
 
     uint32_t now = millis();
     if (!stampedMode) {
-        if (!sdlog_hasGpsTime && (now - bootTimeMs) < GPS_WAIT_MS) {
+        if (!forceOpenWithoutGpsTime && !sdlog_hasGpsTime && (now - bootTimeMs) < GPS_WAIT_MS) {
             return;
         }
     }
@@ -243,6 +244,11 @@ void sdlog_write(const char *line) {
     if ((now - lastFlushMs) > 200 || logBufLen > (sizeof(logBuf) / 2)) {
         flushBuffer();
     }
+}
+
+void sdlog_write_now(const char *line) {
+    forceOpenWithoutGpsTime = true;
+    sdlog_write(line);
 }
 
 void sdlog_onGpsTimeAvailable() {

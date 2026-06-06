@@ -23,6 +23,23 @@
 #define STATUS_LED_PIN      3
 #define STATUS_LED_ACTIVE_HIGH 1
 
+// Finder buzzer and local service button.
+// Recommended buzzer wiring for small active/passive piezo:
+//   D5 -> buzzer +, buzzer - -> GND
+// For louder buzzers, drive D5 into a small NPN/MOSFET instead of powering
+// the buzzer directly from the Teensy pin.
+#define BUZZER_PIN          5
+#define BUZZER_USE_TONE     1
+#define BUTTON_PIN          4
+#define BUTTON_ACTIVE_LOW   1
+#define BUTTON_RESET_HOLD_MS 2000u
+#define LANDED_FINDER_BEEP_ENABLE 1
+#define LANDED_FINDER_FAST_MS 180000u
+#define LANDED_FINDER_MEDIUM_MS 600000u
+#define LANDED_FINDER_FAST_PERIOD_MS 2500u
+#define LANDED_FINDER_MEDIUM_PERIOD_MS 8000u
+#define LANDED_FINDER_SLOW_PERIOD_MS 30000u
+
 // Battery monitor
 #define VBAT_PIN            A0
 // Two-resistor divider for compact rocket wiring:
@@ -145,7 +162,7 @@
 // 0 = disabled for flight
 // 1 = boot + basic status line
 // 2 = boot + verbose sensor/status line for bench debugging
-#define SERIAL_DEBUG_LEVEL  2
+#define SERIAL_DEBUG_LEVEL  0
 
 // Rocket identity
 #define DEFAULT_ROCKET_NAME   "shadow"
