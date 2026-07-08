@@ -23,6 +23,11 @@ extern uint8_t pwr_ia_x10;     // lane A current x10 or peak
 extern uint8_t pwr_ib_x10;     // lane B current x10 or peak
 
 extern float   pwr_localVbat;  // local ground module battery voltage (optional)
+extern uint8_t pwr_localBattPack; // 0 unknown, 1/2/3 = LiPo cell count
+extern bool    pwr_localBattWarn;
+extern bool    pwr_localBattCrit;
+
+const char *power_local_battery_pack_name();
 
 // Approximate RS-485 receive rate (frames per second)
 extern uint16_t pwr_rxRate;

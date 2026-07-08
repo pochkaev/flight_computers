@@ -4,6 +4,7 @@ Firmware:
 
 - [RocketV10.ino](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/RocketV10.ino)
 - [config.h](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/config.h)
+- [PYRO.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/PYRO.md)
 - [AI_CONTEXT.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/AI_CONTEXT.md)
 - [NEXT_STEPS.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/NEXT_STEPS.md)
 - [BUILD_UPLOAD_TEENSY.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/docs/BUILD_UPLOAD_TEENSY.md)
@@ -34,17 +35,24 @@ Compared with `rocket_v8`, `rocket_v10` currently adds:
   - temperature compensation refreshes at `5 Hz`
   - the main loop no longer waits through full pressure and temperature conversions in one barometer sample
 - barometer vertical velocity is calculated over a short `120 ms` window so the faster pressure stream does not amplify single-sample noise
-- launch detection combines acceleration and barometer checks:
+- launch detection is armed only after pad-ready checks, then accepts several flight signatures:
   - blocked for `LAUNCH_POWERON_INHIBIT_MS = 60000 ms` after power-up
   - then requires `LAUNCH_PAD_STILL_ARM_MS = 30000 ms` of continuous stillness before launch detection is armed
-  - movement before launch clears the launch-ready gate, so carrying the rocket to the pad does not remain armed
-  - `relAlt > LAUNCH_REL_ALT_M`
-  - `velZ > LAUNCH_VEL_MPS`
-  - current acceleration magnitude `>= LAUNCH_ACCEL_G`
+  - movement before launch clears the launch-ready gate after `LAUNCH_ARM_MOTION_GRACE_MS`, so carrying the rocket after it is ready does not remain armed forever
+  - acceleration path: rising baro trend, `relAlt > LAUNCH_REL_ALT_M`, `velZ > LAUNCH_VEL_MPS`, and calibrated nose-axis acceleration `-az >= LAUNCH_AXIAL_ACCEL_G`
+  - baro path: rising baro trend, `relAlt > LAUNCH_BARO_REL_ALT_M`, and `velZ > LAUNCH_BARO_VEL_MPS`
+  - obvious-flight path: `relAlt > LAUNCH_OBVIOUS_REL_ALT_M` and `velZ > LAUNCH_OBVIOUS_VEL_MPS`
   - held for `LAUNCH_CONFIRM_MS`
   - blocked until the barometer has settled for `LAUNCH_PAD_SETTLE_MS`
   - requires recent rising-altitude trend over `LAUNCH_TREND_MS`
   - ignores impossible one-sample barometer velocity spikes
+- HPR-inspired recovery/event classification is log-only:
+  - recovers missed `COAST` from sustained baro climb
+  - records near-apogee behavior from high altitude and low vertical speed
+  - recovers missed `DESCENT_BALLISTIC` from sustained fast negative baro velocity
+  - records under-drogue-like descent from sustained slower negative baro velocity
+  - recovers post-flight ground state from low altitude, low velocity, and stillness
+  - logs simulated HPR-style pyro events for configurable channel functions; output pins stay inactive unless `PYRO_OUTPUT_ENABLE=1`
 - GPS is telemetry/informational only:
   - GPS is not used for launch, coast, apogee, descent, or landed decisions
 - GPS is also logged as a secondary altitude reference:
@@ -164,7 +172,7 @@ Buzzer behavior:
   - after 10 minutes: slow single long beep to save battery
 - short button press: silence the landed finder beep
 - long button press, about 2 seconds: close the current log, reset flight state, refresh the current pad baseline, prepare for the next flight attempt, and play a rising confirmation melody
-- long button press is ignored during `ASCENT`, `COAST`, and `DESCENT`
+- long button press is ignored during active flight states such as `ASCENT`, `COAST`, `DESCENT_BALLISTIC`, `UNDER_DROGUE`, and deploy-log states
 
 ## Electrical notes
 
@@ -260,6 +268,10 @@ Rules:
 | Status LED | D3 | LED + resistor to GND | External status LED |
 | Finder buzzer | D5 | Piezo buzzer or transistor driver | Beeps at boot and after landed |
 | Service button | D4 | Momentary switch to GND | Short press silences beep; long press resets for next attempt |
+| Pyro channel 1 output | D6 | MOSFET/transistor driver input | Default function `A`; output disabled by default |
+| Pyro channel 2 output | D7 | MOSFET/transistor driver input | Default function `M`; output disabled by default |
+| Pyro channel 3 output | D8 | MOSFET/transistor driver input | Default function `N`; output disabled by default |
+| Pyro channel 4 output | D15 | MOSFET/transistor driver input | Default function `N`; output disabled by default |
 | GPS RX | D0 (`Serial1 RX`) | GT-U7 `TX` | `9600` baud |
 | GPS TX | D1 (`Serial1 TX`) | GT-U7 `RX` | Optional |
 | I2C SDA | D18 | MS5607 `SDA`, LSM9DS1 `SDA` | Shared I2C bus |
@@ -451,7 +463,7 @@ NAND format status:
   - type `3`: barometer records
   - type `4`: GPS records
   - type `5`: battery records
-  - type `6`: flight state/event records
+  - type `6`: flight state/event records, recovery classifications, and log-only dual-deploy events
   - type `7`: telemetry snapshot records
   - type `8`: quaternion attitude records
 - current export decodes only the current V4 header/record combination:
@@ -739,7 +751,13 @@ Rocket flight states sent to ground:
 | `PAD` | Barometer baseline is established and rocket is waiting for launch detection. |
 | `ASCENT` | Launch has been detected and vertical motion is upward. |
 | `COAST` | Rocket is still airborne but vertical velocity has dropped below the coast threshold. |
-| `DESCENT` | Apogee/descent has been detected. |
+| `SUBSONIC_COAST` | Recovery classifier detected sustained baro climb/coast behavior. |
+| `NEAR_APOGEE` | High altitude and low vertical speed indicate near-apogee behavior. |
+| `DESCENT_BALLISTIC` | Apogee/descent has been detected, with fast negative vertical velocity. |
+| `UNDER_DROGUE` | Descent has slowed into an under-drogue-like profile. |
+| `DUAL_DEPLOY_APOGEE_LOGGED` | Simulated/log-only apogee deploy event has been recorded. |
+| `DUAL_DEPLOY_MAIN_LOGGED` | Simulated/log-only main deploy event has been recorded. |
+| `POST_FLIGHT_GROUND` | Recovery classifier detected post-flight ground behavior. |
 | `LANDED` | Sustained low-speed, low-altitude behavior indicates landing. |
 | `ABORT` | Firmware entered abort/fault state. |
 
@@ -759,4 +777,31 @@ Main rocket log/telemetry values:
 | `batt_mv` | Battery voltage sent to ground in millivolts. |
 | `health_flags` | Bitmask for barometer, IMU, GPS, SD, NAND, log, and battery health. |
 
-Launch detection is armed only after the power-on inhibit has expired and the rocket has been still for the configured pad-still interval. When that gate arms, the barometer baseline is refreshed at the pad. Launch detection then uses current acceleration magnitude, barometer-derived relative altitude, barometer-derived vertical velocity, pad-settle time, and recent rising-altitude trend. This prevents carry-to-pad barometric spikes from starting `ASCENT` unless the rocket has settled on the pad and then sees a launch-like acceleration. GPS, yaw, and magnetometer data are not used for launch, apogee, recovery, or landed decisions.
+Launch detection is armed only after the power-on inhibit has expired and the rocket has been still for the configured pad-still interval. When that gate arms, the barometer baseline is refreshed at the pad. Launch detection then accepts either a calibrated `-Z` nose-axis acceleration launch, a stronger barometer altitude/velocity launch, or an obvious-flight fallback. This follows the same practical idea as larger HPR flight computers: use a fast liftoff signal when available, but do not miss flight when acceleration is lower than expected and the barometer clearly shows climb.
+
+Recovery classification is also HPR-inspired. It can recover missed coast/descent/post-flight states from sustained barometer patterns and stillness checks, and it logs simulated dual-deploy apogee/main charge events to `_event.csv`. With the default safe configuration, these events are records only; the firmware holds deployment outputs inactive and does not pulse them. GPS, yaw, and magnetometer data are not used for launch, apogee, recovery, or landed decisions.
+
+Pyro channel assignments are HPR-style and configurable in firmware:
+
+| Channel | Teensy pin | Default function | Per-channel log toggle |
+|---|---:|---:|---:|
+| Pyro 1 | D6 | `A` apogee/drogue | `PYRO_CH1_LOG_ENABLE` |
+| Pyro 2 | D7 | `M` main | `PYRO_CH2_LOG_ENABLE` |
+| Pyro 3 | D8 | `N` disabled | `PYRO_CH3_LOG_ENABLE` |
+| Pyro 4 | D15 | `N` disabled | `PYRO_CH4_LOG_ENABLE` |
+
+Function letters match the HPR idea:
+
+| Function | Meaning |
+|---:|---|
+| `N` | Disabled/no function |
+| `A` | Apogee/drogue deploy request |
+| `M` | Main deploy request |
+| `B` | Booster/stage separation request |
+| `I` | Sustainer ignition request |
+| `1` | Airstart motor 1 request |
+| `2` | Airstart motor 2 request |
+
+`PYRO_OUTPUT_ENABLE` is `0` by default in [config.h](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/config.h). With this safe default, the firmware initializes D6/D7/D8/D15 to the inactive level but does not pulse them. Matched channels can still create `_event.csv` records if their `PYRO_CH*_LOG_ENABLE` value is `1`. After external drivers and arming hardware are installed, setting `PYRO_OUTPUT_ENABLE=1` will pulse matched channels for `PYRO_FIRE_MS` and add `PYRO_CHANNEL*_OUTPUT_ON/OFF` events to `_event.csv`.
+
+Do not connect an e-match directly to a Teensy GPIO. Use a MOSFET/transistor driver, gate/base pulldown, separate current-limited pyro battery, and a physical arming switch.

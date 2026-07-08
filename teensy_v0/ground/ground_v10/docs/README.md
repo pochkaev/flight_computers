@@ -158,6 +158,7 @@ LoRa CS          <-------> | D10                  |
 SPI MOSI         <-------> | D11                  |
 SPI MISO         <-------> | D12                  |
 SPI SCK          <-------> | D13                  |
+D14 / A0         <-------> | Battery divider      |
 TFT DC           <-------> | D15                  |
 START A          <-------  | D16                  |
 START B          <-------  | D17                  |
@@ -167,10 +168,10 @@ ARM A            <-------  | D20                  |
 ARM B            <-------  | D21                  |
 LED A            <-------> | D22                  |
 LED B            <-------> | D23                  |
+Buzzer           <-------> | D26                  |
 TFT RST          <-------> | D28                  |
 GPS TX           ------->  | D0 / RX1             |
 GPS RX optional  <-------  | D1 / TX1             |
-Battery divider  <-------> | A0                   |
                            | 3.3V / VIN / GND     |
                            +----------------------+
 ```
@@ -201,7 +202,8 @@ Battery divider  <-------> | A0                   |
 | START switch B | D17 | Switch to GND | Active low |
 | Channel A LED | D22 | LED + resistor | Firmware-driven |
 | Channel B LED | D23 | LED + resistor | Firmware-driven |
-| Ground battery ADC | A0 | Divider midpoint | `330k / 100k` assumed in firmware |
+| ARM reminder buzzer | D26 | Piezo buzzer or transistor driver | Chirps when ARM is on/off; reminds while armed |
+| Ground battery ADC | A0 | Divider midpoint | `100k / 22k`, measured A0-fit calibration |
 
 ## Device-by-device connections
 
@@ -403,35 +405,76 @@ Switches:
 
 All these inputs are active low and use internal pull-ups in firmware.
 
-LEDs:
+Indicators:
 
 | Indicator | Teensy pin | Wiring |
 |---|---:|---|
 | Channel A LED | `D22` | Pin -> resistor -> LED -> GND |
 | Channel B LED | `D23` | Pin -> resistor -> LED -> GND |
+| ARM reminder buzzer | `D26` | Small piezo buzzer to GND, or transistor/MOSFET driver for louder buzzer |
+
+Buzzer behavior:
+
+- ARM turns on: short rising chirp
+- ARM remains on: clear heartbeat, about 2 beeps per second
+- ARM remains on longer than 60 seconds: faster urgent heartbeat
+- START is held while armed: solid high tone
+- ARM turns off: short lower safe chirp
 
 ### 8. Ground battery measurement
 
-The ground controller reads local battery voltage on `A0`.
+The ground controller reads local battery voltage on `A0`. On Teensy 4.0 this overlaps with digital `D14`, so do not use `D14` for other peripherals in this build.
 
 Configured divider:
 
-- `R1 = 330k`
-- `R2 = 100k`
+- `R1 = 100k`
+- `R2 = 22k`
 
 Wiring:
 
 ```text
-Battery + -> 330k -> A0 -> 100k -> GND
+Battery + -> 100k -> A0 -> 22k -> GND
 ```
 
 Notes:
 
 - firmware assumes `ADC_REF_V = 3.3`
-- intended for a ground-station battery, documented as a `3S Li-Po` path
-- current firmware also applies a calibration factor:
-  - `GND_VBAT_CAL_FACTOR = 0.8527132`
-  - based on measured `12.10 V` real vs `14.19 V` indicated before calibration
+- intended for `1S`, `2S`, and `3S` Li-Po ground-station batteries
+- firmware uses the measured A0 correction:
+  - `Vbat = A0_V * 5.61783593 - 0.06534455`
+- firmware samples A0 every `50 ms` and displays/logs a `40` sample moving average, about `2 s`
+- Teensy ADC hardware averaging is also enabled with `32` samples per read
+- measured regulator limit: when input falls below about `4.28 V`, the Teensy `3.3 V` rail starts to sag
+- for the current power path, `1S` battery status is conservative:
+  - warning below `4.45 V`
+  - critical below `4.30 V`
+- expected ADC voltage with this divider:
+  - `4.2 V` battery -> about `0.76 V` on `A0`
+  - `12.6 V` battery -> about `2.27 V` on `A0`
+- measured fit points:
+  - `12.20V -> 2.17V A0`
+  - `11.32V -> 2.03V A0`
+  - `10.26V -> 1.84V A0`
+  - `8.95V -> 1.61V A0`
+  - `7.50V -> 1.36V A0`
+  - `5.62V -> 1.01V A0`
+  - `4.62V -> 0.83V A0`
+  - `3.50V -> 0.63V A0`
+
+### 9. RTC backup battery
+
+The Teensy 4.0 RTC backup battery connects to `VBAT` and `GND`. It is only for keeping the internal real-time clock alive when the controller loses main power; it does not power the whole ground station.
+
+Time behavior:
+
+- on boot, firmware reads the Teensy RTC
+- if RTC time looks valid, SD logs can use timestamped filenames before GPS is ready
+- when GPS date/time becomes valid, firmware updates the Teensy RTC from GPS
+- log rows include `time_src=RTC`, `time_src=GPS`, or `time_src=NONE`
+- RTC and SD log timestamps are treated as UTC
+- the `[GND MODULE]` screen displays Central local time with US daylight-saving rules
+
+After first GPS lock with the backup battery connected, the controller should keep usable time across power removal.
 
 ## Shared SPI warning
 
@@ -495,6 +538,7 @@ Shown when no rocket packets have been received yet, or when selected manually.
 | `RX F/N/S` | Receive rate per second for Flight, Nav, and Status packets. |
 | `MISS` | Missed sequence counts for Flight, Nav, and Status packets. |
 | `SD` | Current log file index and line count, or SD status. |
+| `HH:MM` | Central local time from RTC/GPS on the right side of the SD line, or `--:--` when no valid time is available. |
 
 ### `[READY]`
 
@@ -606,12 +650,12 @@ Current cadence:
 - recovery: `NAV` row every `RECOVERY_LOG_MS` (`1 s`)
 - lost link after rocket was seen: `LOST` row every `PAD_LOSTLOG_MS` (`30 s`)
 
-`GND` rows include ground GPS, BMP180 barometric altitude, BMP180 temperature, ground GPS parser counters, ground-module battery voltage, power-module ignition voltage/current/status, RS-485 link status, and whether a rocket packet has ever been seen.
+`GND` rows include ground GPS, BMP180 barometric altitude, BMP180 temperature, ground GPS parser counters, ground-module battery voltage, power-module ignition voltage/current/status, RS-485 link status, whether a rocket packet has ever been seen, and `time_src` / `time_valid`.
 
-Rocket snapshot rows include rocket state, altitude, velocity, GPS, ground GPS/baro/temperature, distance/bearing, RSSI, packet ages, receive/miss counts, rocket battery, rocket health, and ground GPS parser counters.
+Rocket snapshot rows include rocket state, altitude, velocity, GPS, ground GPS/baro/temperature, distance/bearing, RSSI, packet ages, receive/miss counts, rocket battery, rocket health, ground GPS parser counters, and `time_src` / `time_valid`.
 
-Power-module logging is intentionally sparse. Normal RS-485 status frames are used for the screen but are not written repeatedly to SD. A `PWR_START` row is written only on the rising edge of Start A or Start B. It includes the event name, timestamp, ignition voltage, ground-module voltage, channel currents, key/presence/fault state, local arm/start state, power-module arm/on state, and RS-485 link freshness.
+Power-module logging is intentionally sparse. Normal RS-485 status frames are used for the screen but are not written repeatedly to SD. A `PWR_START` row is written only on the rising edge of Start A or Start B. It includes the event name, timestamp, ignition voltage, ground-module voltage, channel currents, key/presence/fault state, local arm/start state, power-module arm/on state, RS-485 link freshness, and `time_src` / `time_valid`.
 
-After a Start A or Start B press, the ground station also writes `PWR_FIRE` rows every `PWR_FIRE_LOG_MS` (`100 ms`) for `PWR_FIRE_LOG_WINDOW_MS` (`3 s`). These rows capture the latest RS-485 power-module status during ignition and include `ia`, `ib`, and the ground-observed `peak_ia` / `peak_ib` over that 3 second window.
+After a Start A or Start B press, the ground station also writes `PWR_FIRE` rows every `PWR_FIRE_LOG_MS` (`100 ms`) for `PWR_FIRE_LOG_WINDOW_MS` (`3 s`). These rows capture the latest RS-485 power-module status during ignition and include `ia`, `ib`, the ground-observed `peak_ia` / `peak_ib` over that 3 second window, and `time_src` / `time_valid`.
 
 Power-module current note: the existing power-module firmware reports live channel current while a lane is armed normally. If a lane enters overcurrent/short fault, the same current field reports the power module's stored fault peak. The ground station does not change power-module firmware; it logs the values available on the existing RS-485 status protocol.

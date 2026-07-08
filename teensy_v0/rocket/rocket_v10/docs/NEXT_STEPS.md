@@ -280,6 +280,96 @@ Possible future hardware:
 - faster barometer or better pressure sensor
 - GPS module with known high-rate airborne mode
 
+## Step 10: Dedicated Pyro Module Architecture
+
+Purpose:
+
+- decide whether to move real pyro outputs out of the main Teensy flight computer
+- make deployment more robust if the main flight computer resets, brownouts, or software gets stuck
+- keep early dual-deploy work safe by testing a separate module in log-only or dummy-load mode before real charges
+
+Candidate architecture:
+
+- main Teensy remains responsible for navigation, LoRa, SD/NAND logging, replay data, and ground telemetry
+- dedicated pyro module handles deployment outputs with its own controller, battery, barometer, and local state machine
+- possible prototype controller: XIAO SAMD21
+- possible prototype sensor: BMP180 for bench redundancy only; prefer a newer barometer such as BMP388/BMP390, MS5607/MS5611, or LPS22/LPS28 for serious deployment work
+- pyro module has its own 2S pyro battery, 4 MOSFET outputs, physical arm/safe input, and per-channel enable/configuration
+- main Teensy connects to pyro module only with data wires, not by sharing pyro output current paths
+
+Expected advantage:
+
+- if the module is only a MOSFET expander that fires when Teensy sends a command, the gain is small and complexity goes up
+- the real value comes when the pyro module is autonomous enough to deploy safely if the main Teensy disappears
+- Teensy can still send deployment commands, but the pyro module should verify them against its own barometer, timers, and arming state before firing
+
+Startup/config flow:
+
+- before flight, Teensy sends initial pyro configuration to the module
+- configuration should include:
+  - channel function: apogee/drogue, main, disabled, future staging/airstart
+  - per-channel output enable
+  - per-channel log enable
+  - apogee delay
+  - main deployment altitude
+  - minimum time after apogee before main
+  - minimum apogee margin above main altitude
+  - safety mode/checksum/version
+- pyro module stores the active config in RAM and reports it back to Teensy
+- ground should eventually show both Teensy config and pyro-module acknowledged config
+
+Flight behavior:
+
+- Teensy may send events such as `APOGEE_DETECTED` or `MAIN_ALLOWED`
+- pyro module should not blindly trust a fire command
+- pyro module should fire only when:
+  - physical arm/safe input is armed
+  - channel output is enabled
+  - continuity is acceptable, when continuity hardware is available
+  - local deployment logic says the event is valid
+  - local battery voltage is acceptable
+- if Teensy link is lost during flight, pyro module should continue with its own fallback logic
+- fallback main logic should be altitude/descent based, not just "main altitude minus 50 m"
+- main should deploy on descent when altitude is at or below the configured main altitude, but only if the flight reached safely above that altitude by a configured margin
+- if main is configured for `500 ft` and the flight only reaches `400 ft`, the main channel should stay inhibited instead of firing immediately after apogee
+
+Recommended communication:
+
+- use UART with CRC, sequence numbers, and acknowledgements as the first implementation
+- avoid I2C between boards for flight-critical inter-board communication because a noisy or reset device can hang the bus
+- consider RS485 if wiring gets longer or noisy
+- consider CAN only if the project grows into a larger avionics bus
+
+Required module safety features:
+
+- outputs forced inactive on boot/reset
+- MOSFET gate pulldowns
+- independent pyro battery voltage measurement
+- physical arm/safe input
+- per-channel output enable
+- per-channel continuity sensing
+- command timeout/watchdog
+- local event log if possible
+- status report back to Teensy: armed state, battery, barometer state, continuity, active config, fired/logged events
+
+Prototype plan:
+
+1. Build a log-only or LED/dummy-load XIAO pyro module.
+2. Send config from Teensy before flight.
+3. Make the module report acknowledged config and local status.
+4. Let the module detect apogee/main from its own barometer and log what it would do.
+5. Compare module decisions with Teensy/NAND logs after multiple flights.
+6. Only after confidence is high, enable real MOSFET outputs for one channel at a time.
+
+Open design questions:
+
+- exact controller and barometer choice
+- whether the pyro module needs its own nonvolatile log storage
+- continuity sensing circuit and current limit
+- connector/pinout between Teensy and pyro module
+- packet format and failsafe behavior if config is missing or corrupt
+- whether to keep main Teensy pyro outputs as a backup or remove real outputs from Teensy entirely
+
 ## Immediate Implementation Order
 
 1. Completed: NAND log metadata.
@@ -292,3 +382,4 @@ Possible future hardware:
 8. Completed: replace Euler attitude internals with quaternion estimator.
 9. Add GPS configuration and metadata.
 10. Add optional barometer timing benchmark if sample spacing or noise looks suspicious.
+11. Draft dedicated pyro module packet format, pinout, and safety state machine before building hardware.

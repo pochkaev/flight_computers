@@ -13,6 +13,7 @@ enum FlightPhase : uint8_t {
 enum PageIndex : uint8_t {
     PAGE_PREFLIGHT = 0,
     PAGE_ROCKET_STATUS,
+    PAGE_PYRO_CONFIG,
     PAGE_LAUNCH,
     PAGE_FLIGHT,
     PAGE_RECOVERY,
@@ -27,7 +28,13 @@ enum RocketFlightState : uint8_t {
     FS_PAD,
     FS_ASCENT,
     FS_COAST,
-    FS_DESCENT,
+    FS_SUBSONIC_COAST,
+    FS_NEAR_APOGEE,
+    FS_DESCENT_BALLISTIC,
+    FS_UNDER_DROGUE,
+    FS_DUAL_DEPLOY_APOGEE_LOGGED,
+    FS_DUAL_DEPLOY_MAIN_LOGGED,
+    FS_POST_FLIGHT_GROUND,
     FS_LANDED,
     FS_ABORT
 };
@@ -36,6 +43,12 @@ enum RocketFlightState : uint8_t {
 const uint16_t FLAG_LAUNCH = 1 << 0;
 const uint16_t FLAG_APOGEE = 1 << 1;
 const uint16_t FLAG_LANDED = 1 << 2;
+const uint16_t FLAG_DUAL_DEPLOY_APOGEE_LOG = 1 << 3;
+const uint16_t FLAG_DUAL_DEPLOY_MAIN_LOG = 1 << 4;
+const uint16_t FLAG_PYRO_CH1_LOGGED = 1 << 8;
+const uint16_t FLAG_PYRO_CH2_LOGGED = 1 << 9;
+const uint16_t FLAG_PYRO_CH3_LOGGED = 1 << 10;
+const uint16_t FLAG_PYRO_CH4_LOGGED = 1 << 11;
 
 // Rocket status flags from the new rocket_v8 status packet
 const uint16_t HEALTH_BARO_OK = 1 << 0;
@@ -114,3 +127,35 @@ struct __attribute__((packed)) IdentityPacketV1 {
 
     char     name[16];
 };
+
+struct __attribute__((packed)) PyroConfigPacketV1 {
+    uint8_t  version;
+    uint8_t  channel_count;
+    uint8_t  output_enabled;
+    uint8_t  active_high;
+    uint32_t seq;
+    uint32_t ms;
+    uint16_t fire_ms;
+    uint16_t apogee_delay_ms;
+    uint16_t main_min_after_apogee_ms;
+    uint16_t main_alt_m;
+    char     flight_profile;
+    char     channel_func[4];
+    uint8_t  channel_pin[4];
+    uint8_t  channel_log_mask;
+    uint8_t  channel_output_mask;
+};
+static_assert(sizeof(PyroConfigPacketV1) == 31, "PyroConfigPacketV1 size mismatch");
+
+struct __attribute__((packed)) PyroEventPacketV1 {
+    uint8_t  version;
+    uint8_t  event_type;
+    uint8_t  channel_index;
+    char     function;
+    uint32_t seq;
+    uint32_t ms;
+    uint8_t  state;
+    uint16_t flags;
+    uint8_t  output_enabled;
+};
+static_assert(sizeof(PyroEventPacketV1) == 16, "PyroEventPacketV1 size mismatch");

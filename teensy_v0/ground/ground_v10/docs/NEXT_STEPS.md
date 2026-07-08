@@ -24,7 +24,7 @@ Already done:
 
 - ground target corrected to `Teensy 4.0`
 - safer firmware runtime changes applied
-- battery scaling corrected with calibration factor
+- battery scaling corrected with measured A0-fit calibration
 - ground README corrected
 - AI handoff context written
 - shared Teensy build/upload guide added at [BUILD_UPLOAD_TEENSY.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/docs/BUILD_UPLOAD_TEENSY.md)
@@ -246,14 +246,14 @@ Status:
 
 ### Task C: Fine battery calibration if needed
 
-Current calibration is based on:
+Current calibration is based on measured battery input voltage and A0 voltage:
 
-- real `12.10 V`
-- old indicated `14.19 V`
+- `Vbat = A0_V * 5.61783593 - 0.06534455`
+- measurement range: about `3.50 V` to `12.20 V`
 
 If the new displayed value is still off after flashing:
 
-- refine only the calibration factor
+- refine only `GND_VBAT_A0_SLOPE` / `GND_VBAT_A0_OFFSET`
 - do not change divider constants unless hardware changed
 
 ## What not to do yet

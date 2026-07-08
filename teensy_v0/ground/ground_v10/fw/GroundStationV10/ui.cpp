@@ -4,6 +4,7 @@
 #include "sensors.h"
 #include "sdlog.h"
 #include "power.h"
+#include "timekeeper.h"
 #include <ILI9341_t3.h>
 #include <SPI.h>
 
@@ -20,6 +21,7 @@ static uint32_t buttonDownMs = 0;
 static uint32_t manualOverrideMs = 0;
 static bool buttonResetFired = false;
 static bool uiDirty = true;
+static uint32_t pyroFlashStartMs = 0;
 
 // Landed page hold timing
 static bool landedSeen = false;
@@ -39,6 +41,7 @@ static const int HDR_H = 26;
 
 static void drawPreflight();
 static void drawRocketStatus();
+static void drawPyroConfig();
 static void drawFlight();
 static void drawRecovery();
 static void drawLost();
@@ -62,6 +65,15 @@ static float packetAgeS(uint32_t lastMs) {
 
 static bool rocketLinkFresh() {
     return rocketLastPacketMs != 0 && (millis() - rocketLastPacketMs) <= LINK_LOST_MS;
+}
+
+static void formatGroundTime(char *out, size_t n) {
+    GroundDateTime dt;
+    if (timekeeper_getCentralDateTime(dt)) {
+        snprintf(out, n, "%02u:%02u", (unsigned int)dt.hour, (unsigned int)dt.minute);
+    } else {
+        snprintf(out, n, "--:--");
+    }
 }
 
 static float rocketRelAltM() {
@@ -169,15 +181,92 @@ static uint16_t rocketLinkStatusColor() {
 
 static const char* rocketStateName() {
     switch (rocketFlightState) {
-        case FS_IDLE:    return "IDLE";
-        case FS_PAD:     return "PAD";
-        case FS_ASCENT:  return "ASCENT";
-        case FS_COAST:   return "COAST";
-        case FS_DESCENT: return "DESCENT";
-        case FS_LANDED:  return "LANDED";
-        case FS_ABORT:   return "ABORT";
-        default:         return "UNK";
+        case FS_IDLE:                       return "IDLE";
+        case FS_PAD:                        return "PAD";
+        case FS_ASCENT:                     return "ASCENT";
+        case FS_COAST:                      return "COAST";
+        case FS_SUBSONIC_COAST:             return "SUB COAST";
+        case FS_NEAR_APOGEE:                return "APOGEE";
+        case FS_DESCENT_BALLISTIC:          return "BALLISTIC";
+        case FS_UNDER_DROGUE:               return "DROGUE";
+        case FS_DUAL_DEPLOY_APOGEE_LOGGED:  return "APOGEE LOG";
+        case FS_DUAL_DEPLOY_MAIN_LOGGED:    return "MAIN LOG";
+        case FS_POST_FLIGHT_GROUND:         return "POST FLT";
+        case FS_LANDED:                     return "LANDED";
+        case FS_ABORT:                      return "ABORT";
+        default:                            return "UNK";
     }
+}
+
+static const char* pyroFunctionName(char func) {
+    switch (func) {
+        case 'A': return "APOGEE";
+        case 'M': return "MAIN";
+        case 'B': return "BOOST SEP";
+        case 'I': return "SUST IGN";
+        case '1': return "AIRSTART1";
+        case '2': return "AIRSTART2";
+        case 'N': return "DISABLED";
+        default: return "UNKNOWN";
+    }
+}
+
+static const char* pyroEventName(uint8_t eventType) {
+    switch (eventType) {
+        case 40: return "APOGEE LOG";
+        case 41: return "MAIN LOG";
+        case 42: return "BOOST SEP";
+        case 43: return "SUST IGN";
+        case 44: return "AIRSTART1";
+        case 45: return "AIRSTART2";
+        case 46: return "STAGE INHIBIT";
+        case 50: return "CH1 LOG";
+        case 51: return "CH2 LOG";
+        case 52: return "CH3 LOG";
+        case 53: return "CH4 LOG";
+        case 60: return "CH1 ON";
+        case 61: return "CH2 ON";
+        case 62: return "CH3 ON";
+        case 63: return "CH4 ON";
+        case 64: return "CH1 OFF";
+        case 65: return "CH2 OFF";
+        case 66: return "CH3 OFF";
+        case 67: return "CH4 OFF";
+        default: return "PYRO EVENT";
+    }
+}
+
+static bool drawPyroFlashIfActive(uint32_t now) {
+    if (rocketPyroFlashPending) {
+        rocketPyroFlashPending = false;
+        pyroFlashStartMs = now;
+        lastRenderedPage = 0xFF;
+    }
+    if (pyroFlashStartMs == 0) return false;
+
+    const uint32_t elapsed = now - pyroFlashStartMs;
+    const uint32_t redMs = 550;
+    const uint32_t darkMs = 250;
+    const uint32_t cycleMs = redMs + darkMs;
+    const uint32_t totalMs = cycleMs * 3;
+    if (elapsed >= totalMs) {
+        pyroFlashStartMs = 0;
+        uiDirty = true;
+        return false;
+    }
+
+    bool red = (elapsed % cycleMs) < redMs;
+    tft.fillScreen(red ? COLOR_BAD : COLOR_BG);
+    if (red) {
+        tft.setTextColor(COLOR_TEXT, COLOR_BAD);
+        tft.setTextSize(3);
+        tft.setCursor(28, 84);
+        tft.print("PYRO EVENT");
+        tft.setTextSize(2);
+        tft.setCursor(28, 128);
+        tft.print(pyroEventName(rocketLastPyroEventType));
+    }
+    return true;
 }
 
 static const char* rocketLaunchStatusName() {
@@ -188,6 +277,44 @@ static const char* rocketLaunchStatusName() {
         case LAUNCH_STATUS_FLIGHT:     return "FLIGHT";
         default:                       return "UNKNOWN";
     }
+}
+
+static uint16_t pyroFunctionColor(char func) {
+    switch (func) {
+        case 'A':
+        case 'M':
+        case 'B':
+        case 'I':
+        case '1':
+        case '2':
+            return COLOR_OK;
+        case 'N':
+            return COLOR_WARN;
+        default:
+            return COLOR_BAD;
+    }
+}
+
+static void printPyroChannelRow(uint8_t ch, int y) {
+    const uint8_t idx = ch - 1;
+    const bool valid = idx < rocketPyroChannelCount;
+    const char func = valid ? rocketPyroChannelFunc[idx] : 'N';
+    const bool logEnabled = (rocketPyroChannelLogMask & (1u << idx)) != 0;
+    const bool outputEnabled = (rocketPyroChannelOutputMask & (1u << idx)) != 0;
+
+    clearTextRow(y, 24);
+    tft.setTextSize(2);
+    tft.setCursor(10, y + 2);
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+    tft.print((unsigned int)ch);
+    tft.print(" ");
+    tft.setTextColor(pyroFunctionColor(func), COLOR_BG);
+    tft.print(pyroFunctionName(func));
+    tft.setTextColor(outputEnabled ? COLOR_BAD : (logEnabled ? COLOR_ACCENT : COLOR_WARN), COLOR_BG);
+    tft.setCursor(242, y + 2);
+    if (outputEnabled) tft.print("FIRE");
+    else tft.print(logEnabled ? "LOGS" : "NOLOG");
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
 }
 
 static uint16_t rocketLaunchStatusColor() {
@@ -219,6 +346,10 @@ void ui_update() {
         return;
     }
     lastUiMs = now;
+
+    if (drawPyroFlashIfActive(now)) {
+        return;
+    }
 
     uint8_t prevPage = currentPage;
 
@@ -308,6 +439,7 @@ void ui_update() {
     switch (currentPage) {
         case PAGE_PREFLIGHT:      drawPreflight();      break;
         case PAGE_ROCKET_STATUS:  drawRocketStatus();   break;
+        case PAGE_PYRO_CONFIG:    drawPyroConfig();     break;
         case PAGE_FLIGHT:         drawFlight();         break;
         case PAGE_RECOVERY:       drawRecovery();       break;
         case PAGE_LOST:           drawLost();           break;
@@ -325,11 +457,17 @@ static void drawPreflight() {
     clearTextRow(HDR_H + 4, 28);
     tft.setCursor(10, HDR_H + 8);
     tft.print("BATT:");
-    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    if (pwr_localBattCrit) tft.setTextColor(COLOR_BAD, COLOR_BG);
+    else if (pwr_localBattWarn) tft.setTextColor(COLOR_WARN, COLOR_BG);
+    else tft.setTextColor(COLOR_OK, COLOR_BG);
     tft.print(pwr_localVbat, 2);
     tft.print("V");
     tft.setTextColor(COLOR_TEXT, COLOR_BG);
-    tft.print("  GPS:");
+    tft.print(" ");
+    tft.setTextColor(pwr_localBattCrit ? COLOR_BAD : (pwr_localBattWarn ? COLOR_WARN : COLOR_ACCENT), COLOR_BG);
+    tft.print(power_local_battery_pack_name());
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+    tft.print(" GPS:");
     tft.print((int)gndSats);
     tft.print("SV");
 
@@ -402,6 +540,13 @@ static void drawPreflight() {
     } else {
         tft.print("SD: ---");
     }
+
+    char timeText[8];
+    formatGroundTime(timeText, sizeof(timeText));
+    tft.setTextColor(timekeeper_hasTime() ? COLOR_ACCENT : COLOR_WARN, COLOR_BG);
+    tft.setCursor(SCREEN_W - (5 * 12) - 10, HDR_H + 176);
+    tft.print(timeText);
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
 }
 
 static void drawRocketStatus() {
@@ -444,9 +589,10 @@ static void drawRocketStatus() {
     tft.setTextColor(rocketGpsOk ? COLOR_OK : COLOR_WARN, COLOR_BG);
     tft.print((int)rktSats);
     tft.setTextColor(COLOR_TEXT, COLOR_BG);
-    tft.print("SV H:");
-    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
-    tft.print(rktHdop, 1);
+    tft.print("SV ");
+    tft.setTextColor(rocketGpsOk ? COLOR_OK : COLOR_WARN, COLOR_BG);
+    tft.print(rocketGpsOk ? "OK" : "---");
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
 
     clearTextRow(HDR_H + 84, 28);
     tft.setCursor(10, HDR_H + 88);
@@ -504,6 +650,64 @@ static void drawRocketStatus() {
     tft.print("SD ");
     tft.setTextColor(rocketNandOk ? COLOR_OK : COLOR_BAD, COLOR_BG);
     tft.print("NAND");
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+}
+
+static void drawPyroConfig() {
+    drawHeader("[PYRO CFG]", rocketName, pageChangedThisFrame);
+    if (pageChangedThisFrame) clearPageBody();
+
+    if (!rocketPyroConfigValid) {
+        clearTextRow(HDR_H + 56, 40);
+        tft.setTextSize(3);
+        tft.setCursor(16, HDR_H + 62);
+        tft.setTextColor(COLOR_WARN, COLOR_BG);
+        tft.print("NO PYRO CONFIG");
+        tft.setTextColor(COLOR_TEXT, COLOR_BG);
+        clearTextRow(HDR_H + 112, 28);
+        tft.setTextSize(2);
+        tft.setCursor(16, HDR_H + 116);
+        tft.print("Wait for rocket LoRa");
+        return;
+    }
+
+    clearTextRow(HDR_H + 6, 26);
+    tft.setTextSize(2);
+    tft.setCursor(10, HDR_H + 10);
+    tft.print("MAIN:");
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    tft.print((unsigned int)rocketPyroMainAltM);
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+    tft.print("m  GLOBAL:");
+    tft.setTextColor(rocketPyroOutputEnabled ? COLOR_BAD : COLOR_WARN, COLOR_BG);
+    tft.print(rocketPyroOutputEnabled ? "FIRE" : "LOGS");
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+
+    clearTextRow(HDR_H + 32, 26);
+    tft.setCursor(10, HDR_H + 36);
+    tft.print("APG DELAY:");
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    tft.print(rocketPyroApogeeDelayMs / 1000.0f, 1);
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+    tft.print("s  WAIT:");
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    tft.print(rocketPyroMainMinAfterApogeeMs / 1000.0f, 1);
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+    tft.print("s");
+
+    clearTextRow(HDR_H + 58, 26);
+    tft.setCursor(10, HDR_H + 62);
+    tft.print("PULSE DUR:");
+    tft.setTextColor(COLOR_ACCENT, COLOR_BG);
+    tft.print(rocketPyroFireMs / 1000.0f, 1);
+    tft.setTextColor(COLOR_TEXT, COLOR_BG);
+    tft.print("s");
+
+    printPyroChannelRow(1, HDR_H + 86);
+    printPyroChannelRow(2, HDR_H + 112);
+    printPyroChannelRow(3, HDR_H + 138);
+    printPyroChannelRow(4, HDR_H + 164);
+
     tft.setTextColor(COLOR_TEXT, COLOR_BG);
 }
 
@@ -793,7 +997,15 @@ static void drawStatusStrip() {
     char detail[36];
     detail[0] = '\0';
 
-    if (rocketLastPacketMs == 0) {
+    if (pwr_localBattCrit) {
+        color = COLOR_BAD;
+        label = "GND BATT CRIT";
+        snprintf(detail, sizeof(detail), "%s %.2fV", power_local_battery_pack_name(), pwr_localVbat);
+    } else if (pwr_localBattWarn) {
+        color = COLOR_WARN;
+        label = "GND BATT WARN";
+        snprintf(detail, sizeof(detail), "%s %.2fV", power_local_battery_pack_name(), pwr_localVbat);
+    } else if (rocketLastPacketMs == 0) {
         color = COLOR_WARN;
         label = "NO ROCKET LINK";
     } else if (!rocketLinkFresh()) {

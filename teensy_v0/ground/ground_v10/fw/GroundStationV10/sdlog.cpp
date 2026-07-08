@@ -1,6 +1,7 @@
 #include "sdlog.h"
 #include "config.h"
 #include "radio.h"
+#include "timekeeper.h"
 #include <TinyGPSPlus.h>
 
 bool sdOK = false;
@@ -155,15 +156,16 @@ static void scanExisting() {
 
 static void buildFilename(char *out, size_t n) {
     uint32_t idx = nextLogIndex;
-    if (stampedMode && gps.date.isValid() && gps.time.isValid()) {
+    GroundDateTime dt;
+    if (stampedMode && timekeeper_getDateTime(dt)) {
         snprintf(out, n,
                  "ground_%04d%02d%02d_%02d%02d%02d_log%04lu.log",
-                 gps.date.year(),
-                 gps.date.month(),
-                 gps.date.day(),
-                 gps.time.hour(),
-                 gps.time.minute(),
-                 gps.time.second(),
+                 dt.year,
+                 dt.month,
+                 dt.day,
+                 dt.hour,
+                 dt.minute,
+                 dt.second,
                  (unsigned long)idx);
     } else {
         snprintf(out, n, "ground_log%04lu.log", (unsigned long)idx);
@@ -185,12 +187,15 @@ void sdlog_ensureFile() {
 
     uint32_t now = millis();
     if (!stampedMode) {
-        if (!forceOpenWithoutGpsTime && !sdlog_hasGpsTime && (now - bootTimeMs) < GPS_WAIT_MS) {
+        if (!forceOpenWithoutGpsTime && !timekeeper_hasTime() && (now - bootTimeMs) < GPS_WAIT_MS) {
             return;
         }
     }
 
-    if (sdlog_hasGpsTime) stampedMode = true;
+    if (timekeeper_hasTime()) {
+        stampedMode = true;
+        sdlog_hasGpsTime = true;
+    }
 
     char filename[64];
     buildFilename(filename, sizeof(filename));

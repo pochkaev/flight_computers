@@ -40,6 +40,48 @@
 #define LANDED_FINDER_MEDIUM_PERIOD_MS 8000u
 #define LANDED_FINDER_SLOW_PERIOD_MS 30000u
 
+// HPR-style pyro/event channels.
+// Current safe default is log-only: pins are initialized to the inactive level,
+// but no output pulse is produced until PYRO_OUTPUT_ENABLE and the matching
+// per-channel PYRO_CHx_OUTPUT_ENABLE are both set to 1.
+// Function letters:
+//   N = disabled, A = apogee/drogue, M = main, B = booster separation,
+//   I = sustainer ignition, 1 = airstart 1, 2 = airstart 2.
+// Use a MOSFET/transistor driver, gate/base pulldown, external arming switch,
+// and current-limited pyro battery before enabling real outputs. Do not drive
+// an e-match directly from a Teensy GPIO pin.
+#define PYRO_OUTPUT_ENABLE       0
+#define PYRO_ACTIVE_HIGH         1
+#define PYRO_FIRE_MS             1000u
+#define PYRO_FLIGHT_PROFILE      'S'   // S = single-stage, 2 = two-stage, A = airstart
+#define PYRO_APOGEE_DELAY_MS     1000u
+#define PYRO_MAIN_MIN_AFTER_APOGEE_MS 1000u
+#define PYRO_STAGING_MIN_REL_ALT_M    20.0f
+#define PYRO_STAGING_MAX_TILT_DEG     45.0f
+#define PYRO_BOOSTER_SEP_DELAY_MS     1000u
+#define PYRO_SUSTAINER_FIRE_DELAY_MS  1000u
+#define PYRO_AIRSTART1_EVENT          'I'   // I = liftoff, B = booster burnout/coast
+#define PYRO_AIRSTART1_DELAY_MS       1000u
+#define PYRO_AIRSTART2_EVENT          '1'   // 1 = airstart 1 fired, B = airstart 1 burnout proxy
+#define PYRO_AIRSTART2_DELAY_MS       1000u
+
+#define PYRO_CH1_PIN         6
+#define PYRO_CH1_FUNC        'A'
+#define PYRO_CH1_LOG_ENABLE  1
+#define PYRO_CH1_OUTPUT_ENABLE 0
+#define PYRO_CH2_PIN         7
+#define PYRO_CH2_FUNC        'M'
+#define PYRO_CH2_LOG_ENABLE  1
+#define PYRO_CH2_OUTPUT_ENABLE 0
+#define PYRO_CH3_PIN         8
+#define PYRO_CH3_FUNC        'N'
+#define PYRO_CH3_LOG_ENABLE  1
+#define PYRO_CH3_OUTPUT_ENABLE 0
+#define PYRO_CH4_PIN         15
+#define PYRO_CH4_FUNC        'N'
+#define PYRO_CH4_LOG_ENABLE  1
+#define PYRO_CH4_OUTPUT_ENABLE 0
+
 // Battery monitor
 #define VBAT_PIN            A0
 // Two-resistor divider for compact rocket wiring:
@@ -121,14 +163,19 @@
 #define IMU_MAG_RANGE_GAUSS     4
 
 // Flight-state confirmation thresholds
-#define LAUNCH_ACCEL_G            2.0f
+#define LAUNCH_AXIAL_ACCEL_G      1.35f
 #define LAUNCH_ACCEL_VEL_MPS      8.0f
 #define LAUNCH_REL_ALT_M          3.0f
 #define LAUNCH_VEL_MPS            8.0f
+#define LAUNCH_BARO_REL_ALT_M     8.0f
+#define LAUNCH_BARO_VEL_MPS       8.0f
+#define LAUNCH_OBVIOUS_REL_ALT_M  25.0f
+#define LAUNCH_OBVIOUS_VEL_MPS    2.0f
 #define LAUNCH_CONFIRM_MS         120
 #define LAUNCH_PAD_SETTLE_MS      2500
 #define LAUNCH_POWERON_INHIBIT_MS 60000u
 #define LAUNCH_PAD_STILL_ARM_MS   30000u
+#define LAUNCH_ARM_MOTION_GRACE_MS 2000u
 #define LAUNCH_PAD_STILL_ACCEL_ERR_G 0.20f
 #define LAUNCH_PAD_STILL_GYRO_DPS 12.0f
 #define LAUNCH_TREND_MS           150
@@ -141,6 +188,20 @@
 #define APOGEE_VEL_MPS           -0.5f
 #define APOGEE_MIN_REL_ALT_M      30.0f
 #define APOGEE_CONFIRM_MS         250
+#define RECOVERY_SUBSONIC_COAST_REL_ALT_M 25.0f
+#define RECOVERY_SUBSONIC_COAST_VEL_MPS 8.0f
+#define RECOVERY_NEAR_APOGEE_REL_ALT_M 25.0f
+#define RECOVERY_NEAR_APOGEE_FALLBACK_REL_ALT_M 60.0f
+#define RECOVERY_NEAR_APOGEE_ABS_VEL_MPS 2.0f
+#define RECOVERY_DESCENT_REL_ALT_M 25.0f
+#define RECOVERY_DESCENT_VEL_MPS  -8.0f
+#define RECOVERY_UNDER_DROGUE_REL_ALT_M 25.0f
+#define RECOVERY_UNDER_DROGUE_FAST_VEL_MPS -8.0f
+#define RECOVERY_POST_FLIGHT_MAX_REL_ALT_M 20.0f
+#define RECOVERY_CLASSIFY_CONFIRM_MS 1000u
+#define RECOVERY_POST_FLIGHT_CONFIRM_MS 5000u
+#define DUAL_DEPLOY_MAIN_ALT_M    153.0f
+#define DUAL_DEPLOY_MAIN_MIN_APOGEE_MARGIN_M 20.0f
 #define ENABLE_LOW_ENERGY_DIRECT_LANDED 0
 #define LOW_ENERGY_DIRECT_LANDED_MAX_ALT_M 8.0f
 #define LANDED_ABS_VEL_MPS        0.7f
@@ -175,6 +236,10 @@
 #define PKT_TYPE_NAV_V7     0x02
 #define PKT_TYPE_STATUS_V8  0x03
 #define PKT_TYPE_IDENTITY_V1 0x04
+#define PKT_TYPE_PYRO_CONFIG_V1 0x05
+#define PKT_TYPE_PYRO_EVENT_V1  0x06
+
+#define PYRO_CONFIG_TX_MS 10000u
 
 // Health bits for status packet
 #define HEALTH_BARO_OK      (1u << 0)

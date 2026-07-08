@@ -52,6 +52,15 @@ Important connections:
   - short press silences the landed finder beep
   - hold for about 2 seconds to close the current log, re-baseline on the pad, prepare for the next flight attempt, and play a confirmation melody
   - reset is refused during active ascent/coast/descent
+- HPR-style pyro/event channels:
+  - channel 1: `pin 6`, default function `A` apogee/drogue
+  - channel 2: `pin 7`, default function `M` main
+  - channel 3: `pin 8`, default function `N` disabled
+  - channel 4: `pin 15`, default function `N` disabled
+  - supported function letters: `N` disabled, `A` apogee/drogue, `M` main, `B` booster separation, `I` sustainer ignition, `1` airstart 1, `2` airstart 2
+  - each channel has a `PYRO_CH*_LOG_ENABLE` toggle for channel-level event records
+  - `PYRO_OUTPUT_ENABLE = 0` by default, so matched channel requests are logged but D6/D7/D8/D15 are not pulsed
+  - output pins are initialized to the inactive level; use MOSFET/transistor drivers, pulldowns, external arming, and a pyro battery before enabling output pulses
 
 ## Current v10 status
 
@@ -89,16 +98,27 @@ New in `rocket_v10` already implemented:
   - barometer samples no longer block the main loop with back-to-back conversion delays
 - barometer-derived `velZ` uses `BARO_VEL_WINDOW_MS = 120` to avoid amplifying 50 Hz pressure noise
 - launch detection:
-  - launch uses current acceleration magnitude, `relAlt`, and `velZ`
-  - current launch thresholds are `accMagG >= 2 g`, `relAlt > 3 m`, and `velZ > 8 m/s`
+  - launch detection arms only after the 60 s power-on inhibit and 30 s still-on-pad gate
+  - current launch detection accepts three paths after `READY`:
+    - acceleration path: rising baro trend, `relAlt > LAUNCH_REL_ALT_M`, `velZ > LAUNCH_VEL_MPS`, and calibrated nose-axis acceleration `-az >= LAUNCH_AXIAL_ACCEL_G`
+    - baro path: rising baro trend, `relAlt > LAUNCH_BARO_REL_ALT_M`, and `velZ > LAUNCH_BARO_VEL_MPS`
+    - obvious-flight fallback: `relAlt > LAUNCH_OBVIOUS_REL_ALT_M` and `velZ > LAUNCH_OBVIOUS_VEL_MPS`
+  - `2 g` is no longer mandatory if the barometer clearly shows a launch
   - launch detection is blocked for `LAUNCH_POWERON_INHIBIT_MS = 60000 ms`
   - after the inhibit, launch detection arms only after `LAUNCH_PAD_STILL_ARM_MS = 30000 ms` of continuous stillness
-  - movement before launch clears the launch-ready gate
+  - movement after `READY` clears the launch-ready gate only after `LAUNCH_ARM_MOTION_GRACE_MS`
   - the pad-still and acceleration gates prevent carry-to-pad barometric spikes from starting `ASCENT`
   - launch is blocked for `LAUNCH_PAD_SETTLE_MS = 2500 ms` after baro baseline
   - launch requires a recent rising-altitude trend:
     - `LAUNCH_TREND_MIN_M = 2.50 m`
     - over `LAUNCH_TREND_MS = 150 ms`
+- HPR-inspired recovery/event classification is log-only:
+  - sustained baro climb can recover missed `COAST`
+  - high altitude plus low vertical speed logs near-apogee behavior
+  - sustained fast negative baro velocity can recover missed `DESCENT_BALLISTIC`
+  - sustained slower negative descent logs under-drogue-like behavior
+  - low altitude, low velocity, and stillness can recover post-flight ground state
+  - simulated dual-deploy and HPR-style pyro channel events are logged only by default; output pulses require `PYRO_OUTPUT_ENABLE = 1`
   - raw baro samples implying more than `BARO_MAX_RAW_VEL_MPS = 120 m/s` are ignored
 - GPS is informational only:
   - GPS does not participate in state-machine decisions
@@ -177,7 +197,13 @@ Current states:
 - `FS_PAD`
 - `FS_ASCENT`
 - `FS_COAST`
-- `FS_DESCENT`
+- `FS_SUBSONIC_COAST`
+- `FS_NEAR_APOGEE`
+- `FS_DESCENT_BALLISTIC`
+- `FS_UNDER_DROGUE`
+- `FS_DUAL_DEPLOY_APOGEE_LOGGED`
+- `FS_DUAL_DEPLOY_MAIN_LOGGED`
+- `FS_POST_FLIGHT_GROUND`
 - `FS_LANDED`
 - `FS_ABORT`
 
@@ -187,6 +213,8 @@ Current hardening added in `v10`:
 - coast requires sustained low vertical speed for `COAST_CONFIRM_MS`
 - apogee/descent requires sustained negative vertical speed for `APOGEE_CONFIRM_MS`
 - landed requires sustained low-speed, low-altitude behavior for `LANDED_CONFIRM_MS`
+- recovery classifications require sustained behavior for `RECOVERY_CLASSIFY_CONFIRM_MS`
+- post-flight ground recovery requires sustained behavior for `RECOVERY_POST_FLIGHT_CONFIRM_MS`
 
 The thresholds are now centralized in [config.h](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/config.h).
 

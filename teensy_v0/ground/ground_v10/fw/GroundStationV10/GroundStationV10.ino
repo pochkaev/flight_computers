@@ -6,6 +6,7 @@
 #include "sdlog.h"
 #include "ui.h"
 #include "power.h"
+#include "timekeeper.h"
 
 static uint32_t lastPadLogMs = 0;
 static uint32_t lastLostLogMs = 0;
@@ -29,7 +30,13 @@ static const char *rocketStateLogName() {
         case FS_PAD: return "PAD";
         case FS_ASCENT: return "ASCENT";
         case FS_COAST: return "COAST";
-        case FS_DESCENT: return "DESCENT";
+        case FS_SUBSONIC_COAST: return "SUBSONIC_COAST";
+        case FS_NEAR_APOGEE: return "NEAR_APOGEE";
+        case FS_DESCENT_BALLISTIC: return "DESCENT_BALLISTIC";
+        case FS_UNDER_DROGUE: return "UNDER_DROGUE";
+        case FS_DUAL_DEPLOY_APOGEE_LOGGED: return "DUAL_DEPLOY_APOGEE_LOGGED";
+        case FS_DUAL_DEPLOY_MAIN_LOGGED: return "DUAL_DEPLOY_MAIN_LOGGED";
+        case FS_POST_FLIGHT_GROUND: return "POST_FLIGHT_GROUND";
         case FS_LANDED: return "LANDED";
         case FS_ABORT: return "ABORT";
         default: return "UNK";
@@ -41,6 +48,12 @@ static const char *rocketBattStatusLogName() {
     if (rocketBattWarn) return "WARN";
     if (rocketBattOk) return "OK";
     return "UNK";
+}
+
+static const char *groundBattStatusLogName() {
+    if (pwr_localBattCrit) return "CRIT";
+    if (pwr_localBattWarn) return "WARN";
+    return "OK";
 }
 
 static float ageSeconds(uint32_t lastMs) {
@@ -67,7 +80,8 @@ void log_snapshot(const char *type, FlightPhase ph) {
         "miss_f=%lu,miss_n=%lu,miss_s=%lu,"
         "rkt_batt=%.2f,rkt_batt_status=%s,launch_status=%u,launch_wait_s=%u,"
         "ok_gps=%u,ok_imu=%u,ok_baro=%u,ok_sd=%u,ok_nand=%u,ok_log=%u,"
-        "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u",
+        "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u,"
+        "time_src=%s,time_valid=%u",
         type,
         (unsigned long)millis(),
         phaseName(ph),
@@ -121,7 +135,9 @@ void log_snapshot(const char *type, FlightPhase ph) {
         (unsigned long)gndGpsChars,
         (unsigned long)gndGpsPassed,
         (unsigned long)gndGpsFailed,
-        gndGpsLocValid ? 1u : 0u
+        gndGpsLocValid ? 1u : 0u,
+        timekeeper_source_name(),
+        timekeeper_hasTime() ? 1u : 0u
     );
     sdlog_write(line);
 }
@@ -133,9 +149,9 @@ void log_ground() {
         "GND,ms=%lu,"
         "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_temp_c=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
         "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u,"
-        "gnd_v=%.2f,ign_v=%.1f,ia=%.1f,ib=%.1f,"
+        "gnd_v=%.2f,gnd_pack=%s,gnd_batt_status=%s,ign_v=%.1f,ia=%.1f,ib=%.1f,"
         "pwr_key=%u,presA=%u,presB=%u,fault=%u,onA=%u,onB=%u,pwr_link=%u,pwr_rx_rate=%u,"
-        "rocket_seen=%u,rocket_age_s=%.1f",
+        "rocket_seen=%u,rocket_age_s=%.1f,time_src=%s,time_valid=%u",
         (unsigned long)millis(),
         gndLat,
         gndLon,
@@ -149,6 +165,8 @@ void log_ground() {
         (unsigned long)gndGpsFailed,
         gndGpsLocValid ? 1u : 0u,
         pwr_localVbat,
+        power_local_battery_pack_name(),
+        groundBattStatusLogName(),
         pwr_vbat_x10 / 10.0f,
         pwr_ia_x10 / 10.0f,
         pwr_ib_x10 / 10.0f,
@@ -161,13 +179,16 @@ void log_ground() {
         power_link_fresh() ? 1u : 0u,
         (unsigned int)pwr_rxRate,
         rocketLastPacketMs != 0 ? 1u : 0u,
-        ageSeconds(rocketLastPacketMs));
+        ageSeconds(rocketLastPacketMs),
+        timekeeper_source_name(),
+        timekeeper_hasTime() ? 1u : 0u);
 #else
     snprintf(line, sizeof(line),
         "GND,ms=%lu,"
         "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_temp_c=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
         "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u,"
-        "rocket_seen=%u,rocket_age_s=%.1f",
+        "gnd_v=%.2f,gnd_pack=%s,gnd_batt_status=%s,"
+        "rocket_seen=%u,rocket_age_s=%.1f,time_src=%s,time_valid=%u",
         (unsigned long)millis(),
         gndLat,
         gndLon,
@@ -180,8 +201,13 @@ void log_ground() {
         (unsigned long)gndGpsPassed,
         (unsigned long)gndGpsFailed,
         gndGpsLocValid ? 1u : 0u,
+        pwr_localVbat,
+        power_local_battery_pack_name(),
+        groundBattStatusLogName(),
         rocketLastPacketMs != 0 ? 1u : 0u,
-        ageSeconds(rocketLastPacketMs));
+        ageSeconds(rocketLastPacketMs),
+        timekeeper_source_name(),
+        timekeeper_hasTime() ? 1u : 0u);
 #endif
     sdlog_write_now(line);
 }
@@ -210,6 +236,7 @@ void setup() {
 
     sensors_init();
     radio_init();
+    timekeeper_init();
     sdlog_init();
 #if ENABLE_POWER_MODULE
     power_init();
@@ -222,12 +249,13 @@ void setup() {
 void loop() {
     sensors_update();
     radio_update();
+    bool timeChanged = timekeeper_update();
 #if ENABLE_POWER_MODULE
     power_update();
 #endif
 
-    if (!sdlog_hasGpsTime && gps.date.isValid() && gps.time.isValid()) {
-        DBG1("GPS TIME ACQUIRED → timestamp logs");
+    if (timeChanged && timekeeper_hasTime()) {
+        DBG1(String("TIME ") + timekeeper_source_name() + " ACQUIRED -> timestamp logs");
         sdlog_onGpsTimeAvailable();
     }
 

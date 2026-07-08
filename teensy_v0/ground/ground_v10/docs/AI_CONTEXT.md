@@ -91,10 +91,19 @@ Battery:
 
 - `PWR_VBAT_PIN = A0`
 - divider constants:
-  - `GND_VBAT_R1_OHMS = 330k`
-  - `GND_VBAT_R2_OHMS = 100k`
-- calibration factor:
-  - `GND_VBAT_CAL_FACTOR = 0.8527132`
+  - `GND_VBAT_R1_OHMS = 100k`
+  - `GND_VBAT_R2_OHMS = 22k`
+- measured correction:
+  - `GND_VBAT_A0_SLOPE = 5.61783593`
+  - `GND_VBAT_A0_OFFSET = -0.06534455`
+- smoothing:
+  - `GND_VBAT_SAMPLE_MS = 50`
+  - `GND_VBAT_AVG_SAMPLES = 40`
+  - `analogReadAveraging(32)` on Teensy 4
+- current power path:
+  - Teensy `3.3 V` rail sags below about `4.28 V` input
+  - `GND_BATT_1S_WARN_V = 4.45`
+  - `GND_BATT_1S_CRIT_V = 4.30`
 
 ## Shared bus warning
 
@@ -271,12 +280,12 @@ Changes made:
 
 Observed:
 
-- displayed voltage was about `14.19 V`
-- real measured voltage was about `12.10 V`
+- ground battery divider is `100k / 22k`
+- measured battery/A0 pairs span about `3.50 V` to `12.20 V`
 
 Applied correction:
 
-- `GND_VBAT_CAL_FACTOR = 0.8527132`
+- `Vbat = A0_V * 5.61783593 - 0.06534455`
 
 This is now baked into the ground voltage read path.
 
@@ -381,7 +390,7 @@ Libraries:
 3. If assembled-device instability persists:
    - add temporary boot-time peripheral isolation switches in firmware
 4. If battery still needs tuning:
-   - refine `GND_VBAT_CAL_FACTOR`
+   - refine `GND_VBAT_A0_SLOPE` / `GND_VBAT_A0_OFFSET`
 
 ## Current state summary
 

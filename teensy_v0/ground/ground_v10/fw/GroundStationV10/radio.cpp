@@ -18,6 +18,8 @@ uint32_t lastFlightPacketMs = 0;
 uint32_t lastNavPacketMs = 0;
 uint32_t lastStatusPacketMs = 0;
 uint32_t lastIdentityPacketMs = 0;
+uint32_t lastPyroConfigPacketMs = 0;
+uint32_t lastPyroEventPacketMs = 0;
 uint32_t flightRxCount = 0;
 uint32_t navRxCount = 0;
 uint32_t statusRxCount = 0;
@@ -55,6 +57,25 @@ uint32_t rocketStatusLastMs = 0;
 uint8_t rocketLaunchStatus = LAUNCH_STATUS_INHIBIT;
 uint16_t rocketLaunchWaitS = 0;
 
+bool rocketPyroConfigValid = false;
+uint8_t rocketPyroChannelCount = 0;
+uint8_t rocketPyroOutputEnabled = 0;
+uint8_t rocketPyroActiveHigh = 1;
+uint16_t rocketPyroFireMs = 0;
+uint16_t rocketPyroApogeeDelayMs = 0;
+uint16_t rocketPyroMainMinAfterApogeeMs = 0;
+uint16_t rocketPyroMainAltM = 0;
+char rocketPyroFlightProfile = 'S';
+char rocketPyroChannelFunc[4] = {'N', 'N', 'N', 'N'};
+uint8_t rocketPyroChannelPin[4] = {};
+uint8_t rocketPyroChannelLogMask = 0;
+uint8_t rocketPyroChannelOutputMask = 0;
+uint8_t rocketLastPyroEventType = 0;
+uint8_t rocketLastPyroEventChannel = 0xFF;
+char rocketLastPyroEventFunction = 'N';
+uint32_t rocketLastPyroEventSeq = 0;
+bool rocketPyroFlashPending = false;
+
 float rocketBattV = ROCKET_BATT_VOLTAGE;
 
 double gndLat = 0.0;
@@ -79,11 +100,15 @@ volatile bool flightPending = false;
 volatile bool navPending    = false;
 volatile bool statusPending = false;
 volatile bool identityPending = false;
+volatile bool pyroConfigPending = false;
+volatile bool pyroEventPending = false;
 
 FlightPacketV7 flightBuf;
 NavPacketV7    navBuf;
 StatusPacketV8 statusBuf;
 IdentityPacketV1 identityBuf;
+PyroConfigPacketV1 pyroConfigBuf;
+PyroEventPacketV1 pyroEventBuf;
 static bool haveFlightSeq = false;
 static bool haveNavSeq = false;
 static bool haveStatusSeq = false;
@@ -111,14 +136,20 @@ static float rocketRelAltFromBaro() {
 
 static const char *flightStateName(RocketFlightState st) {
     switch (st) {
-        case FS_IDLE:    return "IDLE";
-        case FS_PAD:     return "PAD";
-        case FS_ASCENT:  return "ASCENT";
-        case FS_COAST:   return "COAST";
-        case FS_DESCENT: return "DESCENT";
-        case FS_LANDED:  return "LANDED";
-        case FS_ABORT:   return "ABORT";
-        default:         return "UNK";
+        case FS_IDLE:                      return "IDLE";
+        case FS_PAD:                       return "PAD";
+        case FS_ASCENT:                    return "ASCENT";
+        case FS_COAST:                     return "COAST";
+        case FS_SUBSONIC_COAST:            return "SUBSONIC_COAST";
+        case FS_NEAR_APOGEE:               return "NEAR_APOGEE";
+        case FS_DESCENT_BALLISTIC:         return "DESCENT_BALLISTIC";
+        case FS_UNDER_DROGUE:              return "UNDER_DROGUE";
+        case FS_DUAL_DEPLOY_APOGEE_LOGGED: return "DUAL_DEPLOY_APOGEE_LOGGED";
+        case FS_DUAL_DEPLOY_MAIN_LOGGED:   return "DUAL_DEPLOY_MAIN_LOGGED";
+        case FS_POST_FLIGHT_GROUND:        return "POST_FLIGHT_GROUND";
+        case FS_LANDED:                    return "LANDED";
+        case FS_ABORT:                     return "ABORT";
+        default:                           return "UNK";
     }
 }
 
@@ -165,6 +196,43 @@ static void debugStatusPacket() {
              rocketLogOk ? 1u : 0u,
              lastStatusRssi);
     DBG2(line);
+}
+
+static const char *pyroFuncName(char func) {
+    switch (func) {
+        case 'A': return "APOGEE";
+        case 'M': return "MAIN";
+        case 'B': return "BOOST SEP";
+        case 'I': return "SUST IGN";
+        case '1': return "AIRSTART1";
+        case '2': return "AIRSTART2";
+        case 'N': return "DISABLED";
+        default: return "UNKNOWN";
+    }
+}
+
+static void debugPyroConfigPacket() {
+    char line[160];
+    snprintf(line, sizeof(line),
+             "PYROCFG out=%u profile=%c ch1=%s ch2=%s ch3=%s ch4=%s",
+             (unsigned int)rocketPyroOutputEnabled,
+             rocketPyroFlightProfile,
+             pyroFuncName(rocketPyroChannelFunc[0]),
+             pyroFuncName(rocketPyroChannelFunc[1]),
+             pyroFuncName(rocketPyroChannelFunc[2]),
+             pyroFuncName(rocketPyroChannelFunc[3]));
+    DBG2(line);
+}
+
+static void debugPyroEventPacket() {
+    char line[128];
+    snprintf(line, sizeof(line),
+             "PYROEV type=%u ch=%u func=%s seq=%lu",
+             (unsigned int)rocketLastPyroEventType,
+             (unsigned int)rocketLastPyroEventChannel,
+             pyroFuncName(rocketLastPyroEventFunction),
+             (unsigned long)rocketLastPyroEventSeq);
+    DBG1(line);
 }
 
 static bool applyReceivedRocketName(const IdentityPacketV1 &pkt) {
@@ -287,6 +355,30 @@ void radio_onReceive(int packetSize) {
         identityPending = true;
         lastCombinedRssi = LoRa.packetRssi();
     }
+    else if (typeByte == PKT_TYPE_PYRO_CONFIG_V1) {
+        if (remaining != (int)sizeof(PyroConfigPacketV1)) {
+            while (LoRa.available()) LoRa.read();
+            return;
+        }
+        uint8_t *p = (uint8_t*)&pyroConfigBuf;
+        for (int i=0; i<remaining && LoRa.available(); ++i) {
+            p[i] = LoRa.read();
+        }
+        pyroConfigPending = true;
+        lastCombinedRssi = LoRa.packetRssi();
+    }
+    else if (typeByte == PKT_TYPE_PYRO_EVENT_V1) {
+        if (remaining != (int)sizeof(PyroEventPacketV1)) {
+            while (LoRa.available()) LoRa.read();
+            return;
+        }
+        uint8_t *p = (uint8_t*)&pyroEventBuf;
+        for (int i=0; i<remaining && LoRa.available(); ++i) {
+            p[i] = LoRa.read();
+        }
+        pyroEventPending = true;
+        lastCombinedRssi = LoRa.packetRssi();
+    }
     else {
         while (LoRa.available()) LoRa.read();
     }
@@ -403,6 +495,56 @@ void radio_update() {
 
         lastIdentityPacketMs = millis();
         if (applyReceivedRocketName(pkt)) {
+            ui_markDirty();
+        }
+    }
+
+    if (pyroConfigPending) {
+        noInterrupts();
+        PyroConfigPacketV1 pkt = pyroConfigBuf;
+        pyroConfigPending = false;
+        interrupts();
+
+        if (pkt.version == 1) {
+            rocketLastPacketMs = millis();
+            lastPyroConfigPacketMs = rocketLastPacketMs;
+            rocketPyroConfigValid = true;
+            rocketPyroChannelCount = pkt.channel_count > 4 ? 4 : pkt.channel_count;
+            rocketPyroOutputEnabled = pkt.output_enabled;
+            rocketPyroActiveHigh = pkt.active_high;
+            rocketPyroFireMs = pkt.fire_ms;
+            rocketPyroApogeeDelayMs = pkt.apogee_delay_ms;
+            rocketPyroMainMinAfterApogeeMs = pkt.main_min_after_apogee_ms;
+            rocketPyroMainAltM = pkt.main_alt_m;
+            rocketPyroFlightProfile = pkt.flight_profile;
+            for (uint8_t i = 0; i < 4; ++i) {
+                rocketPyroChannelFunc[i] = pkt.channel_func[i];
+                rocketPyroChannelPin[i] = pkt.channel_pin[i];
+            }
+            rocketPyroChannelLogMask = pkt.channel_log_mask;
+            rocketPyroChannelOutputMask = pkt.channel_output_mask;
+            debugPyroConfigPacket();
+            ui_markDirty();
+        }
+    }
+
+    if (pyroEventPending) {
+        noInterrupts();
+        PyroEventPacketV1 pkt = pyroEventBuf;
+        pyroEventPending = false;
+        interrupts();
+
+        if (pkt.version == 1) {
+            rocketLastPacketMs = millis();
+            lastPyroEventPacketMs = rocketLastPacketMs;
+            rocketLastPyroEventType = pkt.event_type;
+            rocketLastPyroEventChannel = pkt.channel_index;
+            rocketLastPyroEventFunction = pkt.function;
+            rocketLastPyroEventSeq = pkt.seq;
+            rocketFlightState = (RocketFlightState)pkt.state;
+            rktFlags = pkt.flags;
+            rocketPyroFlashPending = true;
+            debugPyroEventPacket();
             ui_markDirty();
         }
     }
@@ -561,6 +703,8 @@ void radio_resetState() {
     lastNavPacketMs = 0;
     lastStatusPacketMs = 0;
     lastIdentityPacketMs = 0;
+    lastPyroConfigPacketMs = 0;
+    lastPyroEventPacketMs = 0;
     flightRxCount = 0;
     navRxCount = 0;
     statusRxCount = 0;
@@ -596,6 +740,9 @@ void radio_resetState() {
     rocketStatusLastMs = 0;
     rocketLaunchStatus = LAUNCH_STATUS_INHIBIT;
     rocketLaunchWaitS = 0;
+    rocketPyroConfigValid = false;
+    rocketPyroFlashPending = false;
+    rocketPyroChannelOutputMask = 0;
 
     ui_markDirty();
 }

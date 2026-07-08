@@ -1,5 +1,6 @@
 #include "power.h"
 #include "sdlog.h"
+#include "timekeeper.h"
 #include "ui.h"
 
 // RS-485 master protocol (mirrors arduino_remote_module)
@@ -30,6 +31,9 @@ bool pwr_faultAny=false;
 
 uint8_t pwr_vbat_x10=0, pwr_ia_x10=0, pwr_ib_x10=0;
 float   pwr_localVbat=0.0f;
+uint8_t pwr_localBattPack=0;
+bool    pwr_localBattWarn=false;
+bool    pwr_localBattCrit=false;
 bool    pwr_anyArmed=false;
 uint32_t pwr_lastArmOnMs=0;
 
@@ -58,16 +62,187 @@ static float pwrFirePeakA=0.0f;
 static float pwrFirePeakB=0.0f;
 static char pwrFireEventName[8] = "NONE";
 
+static bool armBuzzerPrevArmed=false;
+static uint32_t armBuzzerArmedSinceMs=0;
+static uint32_t armBuzzerPatternStartMs=0;
+static uint8_t armBuzzerPattern=0;
+
 bool power_link_fresh() {
     return (millis() - lastStatusMs) < LINK_FRESH_MS;
 }
 
-// --- Local battery read (e.g., 3.7V via 100k/100k divider) ---
-static float readLocalVbat() {
-    int raw = analogRead(PWR_VBAT_PIN);
-    float v_pin = (float)raw * ADC_REF_V / ADC_MAX_COUNTS;
-    float v_batt = v_pin * (GND_VBAT_R1_OHMS + GND_VBAT_R2_OHMS) / GND_VBAT_R2_OHMS;
-    return v_batt * GND_VBAT_CAL_FACTOR;
+static void buzzerWrite(bool on, uint16_t freqHz = 2400) {
+#if GROUND_BUZZER_USE_TONE
+  if (on) tone(GROUND_BUZZER_PIN, freqHz);
+  else noTone(GROUND_BUZZER_PIN);
+#else
+  (void)freqHz;
+  digitalWrite(GROUND_BUZZER_PIN, on ? HIGH : LOW);
+#endif
+}
+
+static bool noteActive(uint32_t t, uint32_t startMs, uint32_t durationMs) {
+  return t >= startMs && t < (startMs + durationMs);
+}
+
+static void startArmBuzzerPattern(uint8_t pattern) {
+  armBuzzerPattern = pattern;
+  armBuzzerPatternStartMs = millis();
+}
+
+static bool updateArmBuzzerEdgePattern(uint32_t now, uint16_t &freq) {
+  bool on = false;
+
+  if (armBuzzerPattern != 0) {
+    const uint32_t t = now - armBuzzerPatternStartMs;
+    switch (armBuzzerPattern) {
+      case 1: // ARM on
+        on = noteActive(t, 0, 120) || noteActive(t, 220, 180);
+        freq = noteActive(t, 220, 180) ? 3000 : 2200;
+        if (t >= 520) armBuzzerPattern = 0;
+        break;
+      case 2: // ARM off / safe
+        on = noteActive(t, 0, 180);
+        freq = 1400;
+        if (t >= 320) armBuzzerPattern = 0;
+        break;
+      case 3: // normal reminder
+        on = noteActive(t, 0, 180);
+        freq = 2400;
+        if (t >= 320) armBuzzerPattern = 0;
+        break;
+      case 4: // urgent reminder
+        on = noteActive(t, 0, 160) || noteActive(t, 260, 160);
+        freq = 3200;
+        if (t >= 560) armBuzzerPattern = 0;
+        break;
+      default:
+        armBuzzerPattern = 0;
+        break;
+    }
+  }
+
+  return on;
+}
+
+static void updateArmBuzzer(uint32_t now, bool anyArm, bool anyStart) {
+  if (anyArm && !armBuzzerPrevArmed) {
+    armBuzzerArmedSinceMs = now;
+    startArmBuzzerPattern(1);
+  } else if (!anyArm && armBuzzerPrevArmed) {
+    armBuzzerArmedSinceMs = 0;
+    startArmBuzzerPattern(2);
+  }
+
+  armBuzzerPrevArmed = anyArm;
+
+  uint16_t freq = 2400;
+  bool on = updateArmBuzzerEdgePattern(now, freq);
+
+  if (anyArm && armBuzzerPattern == 0) {
+    if (anyStart) {
+      on = true;
+      freq = 3400;
+    } else {
+      const uint32_t armedMs = now - armBuzzerArmedSinceMs;
+      const bool urgent = armedMs >= ARM_URGENT_AFTER_MS;
+      const uint32_t period = urgent ? ARM_URGENT_PERIOD_MS : ARM_HEARTBEAT_PERIOD_MS;
+      const uint32_t onMs = urgent ? ARM_URGENT_ON_MS : ARM_HEARTBEAT_ON_MS;
+      on = (now % period) < onMs;
+      freq = urgent ? 3200 : 2400;
+    }
+  }
+
+  buzzerWrite(on, freq);
+}
+
+// --- Local battery read ---
+static float vbatFromRaw(float rawAvg) {
+    float v_pin = rawAvg * ADC_REF_V / ADC_MAX_COUNTS;
+    float v_batt = v_pin * GND_VBAT_A0_SLOPE + GND_VBAT_A0_OFFSET;
+    return v_batt > 0.0f ? v_batt : 0.0f;
+}
+
+static bool updateLocalVbatAverage() {
+    static uint16_t samples[GND_VBAT_AVG_SAMPLES] = {0};
+    static uint8_t samplePos = 0;
+    static uint8_t sampleCount = 0;
+    static uint32_t sampleSum = 0;
+
+    (void)analogRead(PWR_VBAT_PIN); // settle ADC mux/sample capacitor
+    uint16_t raw = (uint16_t)analogRead(PWR_VBAT_PIN);
+
+    if (sampleCount < GND_VBAT_AVG_SAMPLES) {
+      samples[samplePos] = raw;
+      sampleSum += raw;
+      sampleCount++;
+    } else {
+      sampleSum -= samples[samplePos];
+      samples[samplePos] = raw;
+      sampleSum += raw;
+    }
+
+    samplePos++;
+    if (samplePos >= GND_VBAT_AVG_SAMPLES) samplePos = 0;
+
+    if (sampleCount == 0) return false;
+    pwr_localVbat = vbatFromRaw((float)sampleSum / (float)sampleCount);
+    return true;
+}
+
+static bool thresholdLowWithHysteresis(float v, float threshold, float hyst, bool wasActive) {
+  if (wasActive) return v < (threshold + hyst);
+  return v <= threshold;
+}
+
+static uint8_t detectLocalBatteryPack(float v) {
+  if (!isfinite(v) || v <= 0.0f) return 0;
+
+  if (pwr_localBattPack == 3) {
+    return (v <= GND_BATT_3S_DETECT_DOWN_V) ? 2 : 3;
+  }
+  if (pwr_localBattPack == 2) {
+    if (v >= GND_BATT_3S_DETECT_UP_V) return 3;
+    if (v <= GND_BATT_2S_DETECT_DOWN_V) return 1;
+    return 2;
+  }
+  if (pwr_localBattPack == 1) {
+    return (v >= GND_BATT_2S_DETECT_UP_V) ? 2 : 1;
+  }
+
+  if (v >= GND_BATT_3S_DETECT_UP_V) return 3;
+  if (v >= GND_BATT_2S_DETECT_UP_V) return 2;
+  return 1;
+}
+
+static void updateLocalBatteryStatus(float v) {
+  pwr_localBattPack = detectLocalBatteryPack(v);
+
+  float warn = GND_BATT_1S_WARN_V;
+  float crit = GND_BATT_1S_CRIT_V;
+  if (pwr_localBattPack == 2) {
+    warn = GND_BATT_2S_WARN_V;
+    crit = GND_BATT_2S_CRIT_V;
+  } else if (pwr_localBattPack == 3) {
+    warn = GND_BATT_3S_WARN_V;
+    crit = GND_BATT_3S_CRIT_V;
+  } else if (pwr_localBattPack == 0) {
+    pwr_localBattWarn = true;
+    pwr_localBattCrit = true;
+    return;
+  }
+
+  pwr_localBattWarn = thresholdLowWithHysteresis(v, warn, GND_BATT_WARN_HYST_V, pwr_localBattWarn);
+  pwr_localBattCrit = thresholdLowWithHysteresis(v, crit, GND_BATT_CRIT_HYST_V, pwr_localBattCrit);
+}
+
+const char *power_local_battery_pack_name() {
+  switch (pwr_localBattPack) {
+    case 1: return "1S";
+    case 2: return "2S";
+    case 3: return "3S";
+    default: return "--";
+  }
 }
 
 // CRC-8 Dallas/Maxim
@@ -118,16 +293,20 @@ static void logPowerStartEvent(const char *eventName,
                                bool armB_sw,
                                bool startB_btn,
                                bool startB_ok) {
-  char line[256];
+  char line[320];
   snprintf(line, sizeof(line),
-           "PWR_START,event=%s,ms=%lu,ign_v=%.1f,gnd_v=%.2f,ia=%.1f,ib=%.1f,"
+           "PWR_START,event=%s,ms=%lu,ign_v=%.1f,gnd_v=%.2f,gnd_pack=%s,gnd_batt_warn=%u,gnd_batt_crit=%u,ia=%.1f,ib=%.1f,"
            "key=%d,presA=%d,presB=%d,fault=%d,"
            "armA_sw=%d,startA_btn=%d,startA_ok=%d,armA_seen=%d,onA=%d,"
-           "armB_sw=%d,startB_btn=%d,startB_ok=%d,armB_seen=%d,onB=%d,link=%d",
+           "armB_sw=%d,startB_btn=%d,startB_ok=%d,armB_seen=%d,onB=%d,link=%d,"
+           "time_src=%s,time_valid=%u",
            eventName,
            (unsigned long)millis(),
            pwr_vbat_x10 / 10.0f,
            pwr_localVbat,
+           power_local_battery_pack_name(),
+           pwr_localBattWarn ? 1u : 0u,
+           pwr_localBattCrit ? 1u : 0u,
            pwr_ia_x10 / 10.0f,
            pwr_ib_x10 / 10.0f,
            pwr_key_ok ? 1 : 0,
@@ -144,8 +323,10 @@ static void logPowerStartEvent(const char *eventName,
            startB_ok ? 1 : 0,
            pwr_armB_seen ? 1 : 0,
            pwr_onB ? 1 : 0,
-           power_link_fresh() ? 1 : 0);
-  sdlog_write(line);
+           power_link_fresh() ? 1 : 0,
+           timekeeper_source_name(),
+           timekeeper_hasTime() ? 1u : 0u);
+  sdlog_write_now(line);
 }
 
 static void beginPowerFireLog(const char *eventName) {
@@ -171,14 +352,14 @@ static void logPowerFireSample(bool armA_sw,
   if (ia > pwrFirePeakA) pwrFirePeakA = ia;
   if (ib > pwrFirePeakB) pwrFirePeakB = ib;
 
-  char line[320];
+  char line[384];
   snprintf(line, sizeof(line),
            "PWR_FIRE,event=%s,id=%u,sample=%u,ms=%lu,dt_ms=%lu,"
-           "ign_v=%.1f,gnd_v=%.2f,ia=%.1f,ib=%.1f,peak_ia=%.1f,peak_ib=%.1f,"
+           "ign_v=%.1f,gnd_v=%.2f,gnd_pack=%s,gnd_batt_warn=%u,gnd_batt_crit=%u,ia=%.1f,ib=%.1f,peak_ia=%.1f,peak_ib=%.1f,"
            "key=%d,presA=%d,presB=%d,fault=%d,"
            "armA_sw=%d,startA_btn=%d,startA_ok=%d,armA_seen=%d,onA=%d,"
            "armB_sw=%d,startB_btn=%d,startB_ok=%d,armB_seen=%d,onB=%d,"
-           "link=%d,rx_rate=%u",
+           "link=%d,rx_rate=%u,time_src=%s,time_valid=%u",
            pwrFireEventName,
            (unsigned int)pwrFireLogEvent,
            (unsigned int)pwrFireLogSample++,
@@ -186,6 +367,9 @@ static void logPowerFireSample(bool armA_sw,
            (unsigned long)(millis() - pwrFireLogStartMs),
            pwr_vbat_x10 / 10.0f,
            pwr_localVbat,
+           power_local_battery_pack_name(),
+           pwr_localBattWarn ? 1u : 0u,
+           pwr_localBattCrit ? 1u : 0u,
            ia,
            ib,
            pwrFirePeakA,
@@ -205,7 +389,9 @@ static void logPowerFireSample(bool armA_sw,
            pwr_armB_seen ? 1 : 0,
            pwr_onB ? 1 : 0,
            power_link_fresh() ? 1 : 0,
-           (unsigned int)pwr_rxRate);
+           (unsigned int)pwr_rxRate,
+           timekeeper_source_name(),
+           timekeeper_hasTime() ? 1u : 0u);
   sdlog_write_now(line);
 }
 
@@ -295,12 +481,15 @@ void power_init() {
 
     pinMode(PWR_LED_A_PIN, OUTPUT);
     pinMode(PWR_LED_B_PIN, OUTPUT);
+    pinMode(GROUND_BUZZER_PIN, OUTPUT);
     digitalWrite(PWR_LED_A_PIN, LOW);
     digitalWrite(PWR_LED_B_PIN, LOW);
+    buzzerWrite(false);
 
     pinMode(PWR_VBAT_PIN, INPUT);
 #if defined(__IMXRT1062__)
     analogReadResolution(12);
+    analogReadAveraging(32);
 #endif
 
     lastTxMs = lastPollMs = lastBlinkMs = lastStatusMs = millis();
@@ -324,6 +513,7 @@ void power_update() {
   bool armB_sw    = (digitalRead(PWR_ARM_B_PIN)==LOW);
   bool startA_btn = (digitalRead(PWR_START_A_PIN)==LOW);
   bool startB_btn = (digitalRead(PWR_START_B_PIN)==LOW);
+  updateArmBuzzer(now, armA_sw || armB_sw, startA_btn || startB_btn);
 
   // Safety: require START release after arming
   if (armA_sw && !prevArmA) { okToIgniteA = !startA_btn; }
@@ -418,10 +608,12 @@ void power_update() {
     sendMasterFrame(doPoll, armA_sw, startA_ok, armB_sw, startB_ok);
   }
 
-  // Local battery measurement for UI (slow, ~1 Hz)
+  // Local battery measurement for UI/logging: 2s moving average, updated at 20 Hz.
   static uint32_t lastVbatMs = 0;
-  if (now - lastVbatMs >= 1000) {
+  if (now - lastVbatMs >= GND_VBAT_SAMPLE_MS) {
     lastVbatMs = now;
-    pwr_localVbat = readLocalVbat();
+    if (updateLocalVbatAverage()) {
+      updateLocalBatteryStatus(pwr_localVbat);
+    }
   }
 }

@@ -33,6 +33,8 @@ extern int lastCombinedRssi;
 extern uint32_t lastFlightPacketMs;
 extern uint32_t lastNavPacketMs;
 extern uint32_t lastStatusPacketMs;
+extern uint32_t lastPyroConfigPacketMs;
+extern uint32_t lastPyroEventPacketMs;
 extern uint32_t flightRxCount;
 extern uint32_t navRxCount;
 extern uint32_t statusRxCount;
@@ -71,6 +73,25 @@ extern bool rocketBattCrit;
 extern uint32_t rocketStatusLastMs;
 extern uint8_t rocketLaunchStatus;
 extern uint16_t rocketLaunchWaitS;
+
+extern bool rocketPyroConfigValid;
+extern uint8_t rocketPyroChannelCount;
+extern uint8_t rocketPyroOutputEnabled;
+extern uint8_t rocketPyroActiveHigh;
+extern uint16_t rocketPyroFireMs;
+extern uint16_t rocketPyroApogeeDelayMs;
+extern uint16_t rocketPyroMainMinAfterApogeeMs;
+extern uint16_t rocketPyroMainAltM;
+extern char rocketPyroFlightProfile;
+extern char rocketPyroChannelFunc[4];
+extern uint8_t rocketPyroChannelPin[4];
+extern uint8_t rocketPyroChannelLogMask;
+extern uint8_t rocketPyroChannelOutputMask;
+extern uint8_t rocketLastPyroEventType;
+extern uint8_t rocketLastPyroEventChannel;
+extern char rocketLastPyroEventFunction;
+extern uint32_t rocketLastPyroEventSeq;
+extern bool rocketPyroFlashPending;
 
 // Battery placeholder
 extern float rocketBattV;

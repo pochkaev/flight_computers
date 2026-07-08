@@ -12,6 +12,8 @@
 
 #define SD_CS_PIN          4
 #define BUTTON_PIN         5   // Service / page button (active LOW)
+#define GROUND_BUZZER_PIN  26  // ARM reminder / status buzzer
+#define GROUND_BUZZER_USE_TONE 1
 
 // Launch controller / RS-485 power module (Master)
 // Uses MAX3485 / MAX485 transceiver.
@@ -28,18 +30,20 @@
 #define PWR_LED_A_PIN       22
 #define PWR_LED_B_PIN       23
 
-// Local battery measurement for ground-station 3S Li-Po.
-// Default divider is conservative for up to about 14 V:
-// Vbat -> 330k -> ADC -> 100k -> GND
+// Local battery measurement for ground-station 1S/2S/3S Li-Po.
+// Divider selected from the available resistor kit:
+// Vbat -> 100k -> ADC -> 22k -> GND
 #define PWR_VBAT_PIN        A0
-// Ground battery divider (Vbat -> ADC). Change these to match your resistors.
-#define GND_VBAT_R1_OHMS    330000.0f
-#define GND_VBAT_R2_OHMS    100000.0f
-// Calibration factor from measured battery voltage:
-// real 12.10 V / indicated 14.19 V = 0.8527
-#define GND_VBAT_CAL_FACTOR 0.8527132f
+#define GND_VBAT_R1_OHMS    100000.0f
+#define GND_VBAT_R2_OHMS    22000.0f
+// Measured calibration from real battery voltage and A0 voltage pairs:
+// Vbat = A0_V * 5.61783593 - 0.06534455
+#define GND_VBAT_A0_SLOPE   5.61783593f
+#define GND_VBAT_A0_OFFSET -0.06534455f
 #define ADC_REF_V           3.3f
 #define ADC_MAX_COUNTS      4095.0f
+#define GND_VBAT_SAMPLE_MS  50u
+#define GND_VBAT_AVG_SAMPLES 40u
 
 // LoRa
 #define LORA_FREQUENCY     915E6
@@ -48,6 +52,8 @@
 #define PKT_TYPE_NAV_V7    0x02
 #define PKT_TYPE_STATUS_V8 0x03
 #define PKT_TYPE_IDENTITY_V1 0x04
+#define PKT_TYPE_PYRO_CONFIG_V1 0x05
+#define PKT_TYPE_PYRO_EVENT_V1  0x06
 
 // Logging / timing
 #define GPS_WAIT_MS        60000      // 60s to wait for GPS time
@@ -59,6 +65,11 @@
 #define GROUND_LOG_MS      30000      // Independent ground-only log cadence
 #define PWR_FIRE_LOG_MS    100        // High-rate power samples after START
 #define PWR_FIRE_LOG_WINDOW_MS 3000   // Duration of high-rate power samples
+#define ARM_HEARTBEAT_ON_MS 150       // Normal armed heartbeat beep length
+#define ARM_HEARTBEAT_PERIOD_MS 500   // Normal armed heartbeat cadence
+#define ARM_URGENT_AFTER_MS 60000     // Faster cadence after ARM is on too long
+#define ARM_URGENT_ON_MS 150          // Urgent armed heartbeat beep length
+#define ARM_URGENT_PERIOD_MS 300      // Urgent armed heartbeat cadence
 
 // Display
 #define UI_UPDATE_MS       250        // Refresh rate (ms)
@@ -82,6 +93,23 @@
 // Battery placeholders
 #define GROUND_BATT_VOLTAGE   11.1f
 #define ROCKET_BATT_VOLTAGE    7.0f
+
+// Ground battery status inference. Mirrors the RocketV10 style and extends it
+// to 3S packs used by the ground station.
+#define GND_BATT_2S_DETECT_UP_V   5.15f
+#define GND_BATT_2S_DETECT_DOWN_V 4.85f
+#define GND_BATT_3S_DETECT_UP_V   8.60f
+#define GND_BATT_3S_DETECT_DOWN_V 8.20f
+// Current ground power path loses a strict 3.3V rail below about 4.28V input,
+// so 1S is only treated as safe while there is regulator headroom.
+#define GND_BATT_1S_WARN_V        4.45f
+#define GND_BATT_1S_CRIT_V        4.30f
+#define GND_BATT_2S_WARN_V        6.8f
+#define GND_BATT_2S_CRIT_V        6.4f
+#define GND_BATT_3S_WARN_V        10.2f
+#define GND_BATT_3S_CRIT_V        9.6f
+#define GND_BATT_WARN_HYST_V      0.08f
+#define GND_BATT_CRIT_HYST_V      0.05f
 
 // Rocket battery status inference from status-packet voltage.
 // These mirror the current RocketV10 thresholds. The status packet only sends
