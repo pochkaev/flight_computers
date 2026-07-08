@@ -1,0 +1,9 @@
+.arduino*
+
+# Generated flight and ground-station logs
+rocket/**/logs/
+ground/**/logs/
+
+# Generated local replay/report exports
+*_flight_replay.html
+*_flight_report.html
