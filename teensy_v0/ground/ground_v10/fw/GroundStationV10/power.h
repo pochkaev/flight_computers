@@ -17,6 +17,10 @@ extern bool pwr_key_ok;
 extern bool pwr_presA;
 extern bool pwr_presB;
 extern bool pwr_faultAny;
+extern bool pwr_armA_valid;
+extern bool pwr_armB_valid;
+extern bool pwr_armA_rearmRequired;
+extern bool pwr_armB_rearmRequired;
 
 extern uint8_t pwr_vbat_x10;   // ignition battery x10 (from power module)
 extern uint8_t pwr_ia_x10;     // lane A current x10 or peak
@@ -31,6 +35,8 @@ const char *power_local_battery_pack_name();
 
 // Approximate RS-485 receive rate (frames per second)
 extern uint16_t pwr_rxRate;
+extern uint16_t pwr_lastTxGapMs;
+extern uint16_t pwr_maxTxGapMs;
 
 // Overall arm state for Launch page / auto focus
 extern bool     pwr_anyArmed;       // any ARM switch currently active

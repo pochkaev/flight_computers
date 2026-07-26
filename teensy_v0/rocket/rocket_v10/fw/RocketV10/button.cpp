@@ -32,6 +32,11 @@ extern uint32_t recoveryNearApogeeSinceMs;
 extern uint32_t recoveryDescendingBallisticSinceMs;
 extern uint32_t recoveryUnderDrogueSinceMs;
 extern uint32_t recoveryPostFlightSinceMs;
+extern uint32_t launchCandidateSinceMs;
+extern uint32_t launchImuSinceMs;
+extern uint32_t touchdownCandidateSinceMs;
+extern uint32_t touchdownSoftSinceMs;
+extern uint32_t touchdownStableSinceMs;
 extern uint32_t tBoosterBurnoutMs;
 extern uint32_t tBoosterSeparationMs;
 extern uint32_t tAirStart1Ms;
@@ -49,6 +54,9 @@ extern bool recoveryNearApogeeLogged;
 extern bool recoveryDescendingBallisticLogged;
 extern bool recoveryUnderDrogueLogged;
 extern bool recoveryPostFlightLogged;
+extern bool launchCandidateActive;
+extern bool touchdownCandidateActive;
+extern bool touchdownImpactQualified;
 extern float maxAltM;
 extern float maxVelMps;
 extern float apogeeAltM;
@@ -65,13 +73,29 @@ void finalizeLogFiles(NandCloseReason closeReason);
 void resetRelAltHistory(uint32_t nowMs, float relAlt);
 void clearLaunchArmGate();
 
-static bool flightStateAllowsButtonReset() {
-  return flightState == FS_IDLE || flightState == FS_PAD ||
-         flightState == FS_POST_FLIGHT_GROUND ||
-         flightState == FS_LANDED || flightState == FS_ABORT;
+static bool buttonResetAllowed() {
+  return armSwitchSafe;
 }
 
-static void resetForNextFlightFromButton() {
+static void commitLogsAndRebootFromButton() {
+  stopPyroOutputs();
+  setFinderBeeper(false);
+  finalizeLogFiles(NAND_CLOSE_SERVICE);
+
+  // This is a physical-SAFE service action. Give a short acknowledgement
+  // only after the synchronous NAND commit and file close have completed.
+  buzzerWrite(true, 2800);
+  delay(180);
+  buzzerWrite(false);
+  delay(40);
+
+  __disable_irq();
+  SCB_AIRCR = 0x05FA0004;
+  while (true) {
+  }
+}
+
+void resetForNextFlight() {
   const uint32_t nowMs = millis();
   finalizeLogFiles(NAND_CLOSE_SERVICE);
 
@@ -93,6 +117,11 @@ static void resetForNextFlightFromButton() {
   recoveryDescendingBallisticSinceMs = 0;
   recoveryUnderDrogueSinceMs = 0;
   recoveryPostFlightSinceMs = 0;
+  launchCandidateSinceMs = 0;
+  launchImuSinceMs = 0;
+  touchdownCandidateSinceMs = 0;
+  touchdownSoftSinceMs = 0;
+  touchdownStableSinceMs = 0;
   apogeeChargeLogged = false;
   mainChargeLogged = false;
   boosterBurnoutLogged = false;
@@ -108,6 +137,9 @@ static void resetForNextFlightFromButton() {
   recoveryDescendingBallisticLogged = false;
   recoveryUnderDrogueLogged = false;
   recoveryPostFlightLogged = false;
+  launchCandidateActive = false;
+  touchdownCandidateActive = false;
+  touchdownImpactQualified = false;
   stopPyroOutputs();
   setFinderBeeper(false);
 
@@ -152,10 +184,13 @@ void updateButtonTask() {
 
   if (rawPressed && !buttonResetFired &&
       (uint32_t)(nowMs - buttonDownMs) >= BUTTON_RESET_HOLD_MS) {
-    if (flightStateAllowsButtonReset()) {
-      resetForNextFlightFromButton();
+    if (buttonResetAllowed()) {
+      commitLogsAndRebootFromButton();
     } else {
       startBeepPattern(3);
+      if (SERIAL_DEBUG_LEVEL >= 1) {
+        Serial.println("RocketV10 button reboot refused: physical SAFE required");
+      }
     }
     buttonResetFired = true;
   }

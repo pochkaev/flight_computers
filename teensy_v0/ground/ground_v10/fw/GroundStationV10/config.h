@@ -4,6 +4,7 @@
 // -------------------------------------------------------------
 // Global Configuration for Ground Station
 // -------------------------------------------------------------
+#define GROUND_FW_VERSION "gv10.20260726j"
 
 // Pins
 #define LORA_CS_PIN        10
@@ -48,12 +49,21 @@
 // LoRa
 #define LORA_FREQUENCY     915E6
 #define LORA_SPI_FREQ      8000000
+#define LORA_SPREADING_FACTOR 7
+#define LORA_SIGNAL_BANDWIDTH_HZ 125000L
+#define LORA_CODING_RATE_DENOMINATOR 5
 #define PKT_TYPE_FLIGHT_V7 0x01
 #define PKT_TYPE_NAV_V7    0x02
 #define PKT_TYPE_STATUS_V8 0x03
 #define PKT_TYPE_IDENTITY_V1 0x04
 #define PKT_TYPE_PYRO_CONFIG_V1 0x05
 #define PKT_TYPE_PYRO_EVENT_V1  0x06
+
+// LoRa payload CRC is intentionally disabled in the paired flight profile.
+// Never latch a flight phase from one otherwise plausible packet.
+#define ROCKET_FLIGHT_CONFIRM_PACKETS 3u
+#define ROCKET_LANDED_CONFIRM_PACKETS 3u
+#define ROCKET_SAFE_RESET_CONFIRM_STATUS_PACKETS 2u
 
 // Logging / timing
 #define GPS_WAIT_MS        60000      // 60s to wait for GPS time
@@ -134,12 +144,15 @@
 #define GND_SENSORS_UPDATE_MS    2000
 // Ground GPS (Serial1 -> TinyGPS++) read cadence
 #define GND_GPS_UPDATE_MS        1000
+#define GND_GPS_STALE_MS         5000
 
 // Serial debug:
 // 0 = disabled for field use
 // 1 = boot + important status messages
 // 2 = verbose packet/status debug for bench work
+#ifndef SERIAL_DEBUG_LEVEL
 #define SERIAL_DEBUG_LEVEL 0
+#endif
 
 // Enable / disable RS-485 power module integration (1=on, 0=off)
 #define ENABLE_POWER_MODULE 1

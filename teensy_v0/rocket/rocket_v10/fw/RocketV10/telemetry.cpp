@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "state.h"
+#include "settings.h"
 
 extern volatile bool loraTxBusy;
 extern bool loraOk;
@@ -47,6 +48,36 @@ static const uint8_t PYRO_EVENT_QUEUE_LEN = 8;
 static PyroEventPacketV1 pendingPyroEventPkts[PYRO_EVENT_QUEUE_LEN] = {};
 static uint8_t pendingPyroEventHead = 0;
 static uint8_t pendingPyroEventCount = 0;
+static uint32_t loraTxStartedMs = 0;
+
+static int16_t scaledInt16(float value, float scale) {
+  const float scaled = value * scale;
+  if (!isfinite(scaled)) return 0;
+  if (scaled >= 32767.0f) return INT16_MAX;
+  if (scaled <= -32768.0f) return INT16_MIN;
+  return (int16_t)lroundf(scaled);
+}
+
+static int32_t scaledInt32(float value, float scale) {
+  const double scaled = (double)value * (double)scale;
+  if (!isfinite(scaled)) return 0;
+  if (scaled >= 2147483647.0) return INT32_MAX;
+  if (scaled <= -2147483648.0) return INT32_MIN;
+  return (int32_t)llround(scaled);
+}
+
+static bool sendAsyncPacket(uint8_t packetType, const void *payload, size_t payloadSize) {
+  if (LoRa.beginPacket() == 0) return false;
+  LoRa.write(packetType);
+  LoRa.write((const uint8_t *)payload, payloadSize);
+  loraTxBusy = true;
+  loraTxStartedMs = millis();
+  if (LoRa.endPacket(true) == 0) {
+    loraTxBusy = false;
+    return false;
+  }
+  return true;
+}
 
 static char pyroFunctionForEvent(uint8_t eventType) {
   switch (eventType) {
@@ -105,24 +136,19 @@ static bool sendFlightTelemetry() {
   pkt.flags = flightFlags;
   pkt.seq = flightSeq++;
   pkt.ms = millis();
-  pkt.alt_cm = (int32_t)lroundf(filtAlt * 100.0f);
-  pkt.vel_cms = (int16_t)lroundf(velZ * 100.0f);
-  pkt.ax_cms2 = (int16_t)lroundf(last_ax * 100.0f);
-  pkt.ay_cms2 = (int16_t)lroundf(last_ay * 100.0f);
-  pkt.az_cms2 = (int16_t)lroundf(last_az * 100.0f);
-  pkt.gx_cdeg = (int16_t)lroundf(last_gx * 100.0f);
-  pkt.gy_cdeg = (int16_t)lroundf(last_gy * 100.0f);
-  pkt.gz_cdeg = (int16_t)lroundf(last_gz * 100.0f);
-  pkt.roll_cdeg = (int16_t)lroundf(roll * 5729.57795f);
-  pkt.pitch_cdeg = (int16_t)lroundf(pitch * 5729.57795f);
+  pkt.alt_cm = scaledInt32(filtAlt, 100.0f);
+  pkt.vel_cms = scaledInt16(velZ, 100.0f);
+  pkt.ax_cms2 = scaledInt16(last_ax, 100.0f);
+  pkt.ay_cms2 = scaledInt16(last_ay, 100.0f);
+  pkt.az_cms2 = scaledInt16(last_az, 100.0f);
+  pkt.gx_cdeg = scaledInt16(last_gx, 100.0f);
+  pkt.gy_cdeg = scaledInt16(last_gy, 100.0f);
+  pkt.gz_cdeg = scaledInt16(last_gz, 100.0f);
+  pkt.roll_cdeg = scaledInt16(roll, 5729.57795f);
+  pkt.pitch_cdeg = scaledInt16(pitch, 5729.57795f);
 
   logNandTelemetryBinary(pkt.ms, PKT_TYPE_FLIGHT_V7, pkt.seq);
-  loraTxBusy = true;
-  LoRa.beginPacket();
-  LoRa.write(PKT_TYPE_FLIGHT_V7);
-  LoRa.write((const uint8_t *)&pkt, sizeof(pkt));
-  LoRa.endPacket(true);
-  return true;
+  return sendAsyncPacket(PKT_TYPE_FLIGHT_V7, &pkt, sizeof(pkt));
 }
 
 static bool sendNavTelemetry() {
@@ -140,17 +166,12 @@ static bool sendNavTelemetry() {
   pkt.ms = millis();
   pkt.gps_lat_e7 = (int32_t)llround(gpsLatDeg * 1e7);
   pkt.gps_lon_e7 = (int32_t)llround(gpsLonDeg * 1e7);
-  pkt.gps_alt_cm = (int32_t)lroundf(gpsAltM * 100.0f);
-  pkt.baro_alt_cm = (int32_t)lroundf(filtAlt * 100.0f);
+  pkt.gps_alt_cm = scaledInt32(gpsAltM, 100.0f);
+  pkt.baro_alt_cm = scaledInt32(filtAlt, 100.0f);
   pkt.last_fix_age_ms = haveGoodFix ? (millis() - lastFixTimeMs) : 0xFFFFFFFFu;
 
   logNandTelemetryBinary(pkt.ms, PKT_TYPE_NAV_V7, pkt.seq);
-  loraTxBusy = true;
-  LoRa.beginPacket();
-  LoRa.write(PKT_TYPE_NAV_V7);
-  LoRa.write((const uint8_t *)&pkt, sizeof(pkt));
-  LoRa.endPacket(true);
-  return true;
+  return sendAsyncPacket(PKT_TYPE_NAV_V7, &pkt, sizeof(pkt));
 }
 
 static bool sendStatusTelemetry() {
@@ -170,12 +191,7 @@ static bool sendStatusTelemetry() {
   pkt.last_rssi_dbm = 0;
 
   logNandTelemetryBinary(pkt.ms, PKT_TYPE_STATUS_V8, pkt.seq);
-  loraTxBusy = true;
-  LoRa.beginPacket();
-  LoRa.write(PKT_TYPE_STATUS_V8);
-  LoRa.write((const uint8_t *)&pkt, sizeof(pkt));
-  LoRa.endPacket(true);
-  return true;
+  return sendAsyncPacket(PKT_TYPE_STATUS_V8, &pkt, sizeof(pkt));
 }
 
 static bool sendIdentityTelemetry() {
@@ -191,12 +207,7 @@ static bool sendIdentityTelemetry() {
   strncpy(pkt.name, rocketName, sizeof(pkt.name));
 
   logNandTelemetryBinary(pkt.ms, PKT_TYPE_IDENTITY_V1, pkt.seq);
-  loraTxBusy = true;
-  LoRa.beginPacket();
-  LoRa.write(PKT_TYPE_IDENTITY_V1);
-  LoRa.write((const uint8_t *)&pkt, sizeof(pkt));
-  LoRa.endPacket(true);
-  return true;
+  return sendAsyncPacket(PKT_TYPE_IDENTITY_V1, &pkt, sizeof(pkt));
 }
 
 static bool sendPyroConfigTelemetry() {
@@ -212,7 +223,7 @@ static bool sendPyroConfigTelemetry() {
   pkt.fire_ms = PYRO_FIRE_MS > 65535u ? 65535u : (uint16_t)PYRO_FIRE_MS;
   pkt.apogee_delay_ms = PYRO_APOGEE_DELAY_MS > 65535u ? 65535u : (uint16_t)PYRO_APOGEE_DELAY_MS;
   pkt.main_min_after_apogee_ms = PYRO_MAIN_MIN_AFTER_APOGEE_MS > 65535u ? 65535u : (uint16_t)PYRO_MAIN_MIN_AFTER_APOGEE_MS;
-  pkt.main_alt_m = DUAL_DEPLOY_MAIN_ALT_M < 0 ? 0 : (uint16_t)lroundf(DUAL_DEPLOY_MAIN_ALT_M);
+  pkt.main_alt_m = rocketSettings.mainAltM < 0 ? 0 : (uint16_t)lroundf(rocketSettings.mainAltM);
   pkt.flight_profile = PYRO_FLIGHT_PROFILE;
   pkt.channel_func[0] = PYRO_CH1_FUNC;
   pkt.channel_func[1] = PYRO_CH2_FUNC;
@@ -232,12 +243,7 @@ static bool sendPyroConfigTelemetry() {
   if (PYRO_CH4_OUTPUT_ENABLE) pkt.channel_output_mask |= 1u << 3;
 
   logNandTelemetryBinary(pkt.ms, PKT_TYPE_PYRO_CONFIG_V1, pkt.seq);
-  loraTxBusy = true;
-  LoRa.beginPacket();
-  LoRa.write(PKT_TYPE_PYRO_CONFIG_V1);
-  LoRa.write((const uint8_t *)&pkt, sizeof(pkt));
-  LoRa.endPacket(true);
-  return true;
+  return sendAsyncPacket(PKT_TYPE_PYRO_CONFIG_V1, &pkt, sizeof(pkt));
 }
 
 static bool sendPyroEventTelemetry() {
@@ -247,12 +253,7 @@ static bool sendPyroEventTelemetry() {
   pendingPyroEventHead = (pendingPyroEventHead + 1) % PYRO_EVENT_QUEUE_LEN;
   pendingPyroEventCount--;
   logNandTelemetryBinary(pkt.ms, PKT_TYPE_PYRO_EVENT_V1, pkt.seq);
-  loraTxBusy = true;
-  LoRa.beginPacket();
-  LoRa.write(PKT_TYPE_PYRO_EVENT_V1);
-  LoRa.write((const uint8_t *)&pkt, sizeof(pkt));
-  LoRa.endPacket(true);
-  return true;
+  return sendAsyncPacket(PKT_TYPE_PYRO_EVENT_V1, &pkt, sizeof(pkt));
 }
 
 void telemetryTask() {
@@ -263,23 +264,26 @@ void telemetryTask() {
   static uint32_t lastPyroConfigTxMs = 0;
   const uint32_t nowMs = millis();
   const bool recoveryMode = (flightState == FS_LANDED);
-  const uint32_t flightTxPeriodMs = recoveryMode ? RECOVERY_FLIGHT_TX_MS : FLIGHT_TX_MS;
-  const uint32_t navTxPeriodMs = recoveryMode ? RECOVERY_NAV_TX_MS : NAV_TX_MS;
-  const uint32_t statusTxPeriodMs = recoveryMode ? RECOVERY_STATUS_TX_MS : STATUS_TX_MS;
+  const uint32_t flightTxPeriodMs = recoveryMode ? RECOVERY_FLIGHT_TX_MS : rocketSettings.flightTxMs;
+  const uint32_t navTxPeriodMs = recoveryMode ? RECOVERY_NAV_TX_MS : rocketSettings.navTxMs;
+  const uint32_t statusTxPeriodMs = recoveryMode ? RECOVERY_STATUS_TX_MS : rocketSettings.statusTxMs;
 
+  if (loraTxBusy && loraTxStartedMs != 0 &&
+      (uint32_t)(nowMs - loraTxStartedMs) >= LORA_TX_TIMEOUT_MS) {
+    LoRa.idle();
+    loraTxBusy = false;
+    loraTxStartedMs = 0;
+  }
   if (!loraOk || loraTxBusy) return;
 
   if (pendingPyroEventCount > 0) {
     if (sendPyroEventTelemetry()) return;
   }
 
-  if (lastIdentityTxMs == 0 || (uint32_t)(nowMs - lastIdentityTxMs) >= IDENTITY_TX_MS) {
-    if (sendIdentityTelemetry()) lastIdentityTxMs = nowMs;
-    return;
-  }
-
-  if (lastPyroConfigTxMs == 0 || (uint32_t)(nowMs - lastPyroConfigTxMs) >= PYRO_CONFIG_TX_MS) {
-    if (sendPyroConfigTelemetry()) lastPyroConfigTxMs = nowMs;
+  // Flight is the primary live safety stream. It must not be starved when a
+  // delayed loop makes several lower-rate packet classes due at once.
+  if ((uint32_t)(nowMs - lastFlightTxMs) >= flightTxPeriodMs) {
+    if (sendFlightTelemetry()) lastFlightTxMs = nowMs;
     return;
   }
 
@@ -293,8 +297,13 @@ void telemetryTask() {
     return;
   }
 
-  if ((uint32_t)(nowMs - lastFlightTxMs) >= flightTxPeriodMs) {
-    if (sendFlightTelemetry()) lastFlightTxMs = nowMs;
+  if (lastIdentityTxMs == 0 || (uint32_t)(nowMs - lastIdentityTxMs) >= IDENTITY_TX_MS) {
+    if (sendIdentityTelemetry()) lastIdentityTxMs = nowMs;
+    return;
+  }
+
+  if (lastPyroConfigTxMs == 0 || (uint32_t)(nowMs - lastPyroConfigTxMs) >= PYRO_CONFIG_TX_MS) {
+    if (sendPyroConfigTelemetry()) lastPyroConfigTxMs = nowMs;
     return;
   }
 }

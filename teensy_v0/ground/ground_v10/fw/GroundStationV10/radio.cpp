@@ -1,9 +1,14 @@
 #include "radio.h"
 #include "config.h"
 #include "ui.h"
+#include "settings.h"
 
 TinyGPSPlus gps;
 char rocketName[16] = DEFAULT_ROCKET_NAME;
+bool groundLoraOk = false;
+uint32_t groundRadioRearmCount = 0;
+static uint32_t lastRadioInitAttemptMs = 0;
+static uint32_t lastRadioRearmMs = 0;
 
 bool rocketHasFix = false;
 bool rocketLaunched = false;
@@ -54,7 +59,7 @@ bool rocketBattOk = true;
 bool rocketBattWarn = false;
 bool rocketBattCrit = false;
 uint32_t rocketStatusLastMs = 0;
-uint8_t rocketLaunchStatus = LAUNCH_STATUS_INHIBIT;
+uint8_t rocketLaunchStatus = LAUNCH_STATUS_BOOT_WAIT;
 uint16_t rocketLaunchWaitS = 0;
 
 bool rocketPyroConfigValid = false;
@@ -120,6 +125,9 @@ static uint16_t flightRxCountWindow = 0;
 static uint16_t navRxCountWindow = 0;
 static uint16_t statusRxCountWindow = 0;
 static uint32_t lastRateMs = 0;
+static uint8_t rocketFlightEvidencePackets = 0;
+static uint8_t rocketLandedEvidencePackets = 0;
+static uint8_t rocketSafeResetStatusPackets = 0;
 
 static bool isReasonableRocketBaroAlt(float altM) {
     return isfinite(altM) && altM > -500.0f && altM < 10000.0f;
@@ -127,6 +135,34 @@ static bool isReasonableRocketBaroAlt(float altM) {
 
 static bool isReasonableRocketRelAlt(float relAltM) {
     return isfinite(relAltM) && relAltM > -100.0f && relAltM < 10000.0f;
+}
+
+static bool isValidRocketState(uint8_t state) {
+    return state <= (uint8_t)FS_ABORT;
+}
+
+static bool isValidFlightPacket(const FlightPacketV7 &pkt) {
+    return pkt.version == 7 &&
+           isValidRocketState(pkt.state) &&
+           pkt.alt_cm > -50000L && pkt.alt_cm < 1000000L;
+}
+
+static bool isValidNavPacket(const NavPacketV7 &pkt) {
+    return pkt.version == 7 &&
+           pkt.gps_fix_type <= 3 &&
+           pkt.gps_sats <= 64 &&
+           pkt.gps_lat_e7 >= -900000000L && pkt.gps_lat_e7 <= 900000000L &&
+           pkt.gps_lon_e7 >= -1800000000L && pkt.gps_lon_e7 <= 1800000000L &&
+           pkt.gps_alt_cm > -50000L && pkt.gps_alt_cm < 1000000L &&
+           pkt.baro_alt_cm > -50000L && pkt.baro_alt_cm < 1000000L;
+}
+
+static bool isValidStatusPacket(const StatusPacketV8 &pkt) {
+    return pkt.version == 8 &&
+           isValidRocketState(pkt.state) &&
+           pkt.launch_status <= LAUNCH_STATUS_FLIGHT &&
+           pkt.gps_sats <= 64 &&
+           pkt.batt_mv <= 15000u;
 }
 
 static float rocketRelAltFromBaro() {
@@ -384,19 +420,34 @@ void radio_onReceive(int packetSize) {
     }
 }
 
+static bool beginLoRaHardware() {
+    lastRadioInitAttemptMs = millis();
+    LoRa.setPins(LORA_CS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
+    LoRa.setSPIFrequency(LORA_SPI_FREQ);
+    if (!LoRa.begin(LORA_FREQUENCY)) {
+        groundLoraOk = false;
+        DBG1("LoRa init FAILED – running without radio");
+        return false;
+    }
+    groundLoraOk = true;
+    radio_applySettings();
+    return true;
+}
+
 void radio_init() {
     Serial1.begin(9600);
 
-    LoRa.setPins(LORA_CS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
-    if (!LoRa.begin(LORA_FREQUENCY)) {
-        DBG1("LoRa init FAILED – running without radio");
-        return;  // Continue running with whatever data we have
-    }
-    LoRa.setSPIFrequency(LORA_SPI_FREQ);
-    LoRa.onReceive(radio_onReceive);
-    LoRa.receive();
+    if (beginLoRaHardware()) DBG1("LoRa + GPS initialized");
+}
 
-    DBG1("LoRa + GPS initialized");
+void radio_applySettings() {
+    if (!groundLoraOk) return;
+    LoRa.idle();
+    LoRa.setSpreadingFactor(groundSettings.loraSf);
+    LoRa.setSignalBandwidth(groundSettings.loraBandwidthHz);
+    LoRa.setCodingRate4(groundSettings.loraCr);
+    LoRa.disableCrc();
+    LoRa.receive();
 }
 
 float calculateDistanceM(double lat1, double lon1, double lat2, double lon2) {
@@ -426,6 +477,32 @@ float calculateBearingDeg(double lat1, double lon1, double lat2, double lon2) {
 
 void radio_update() {
     bool launchedBefore = rocketLaunched;
+    const uint32_t nowMs = millis();
+
+    if (!groundLoraOk) {
+        if ((uint32_t)(nowMs - lastRadioInitAttemptMs) >= 2000u) {
+            beginLoRaHardware();
+        }
+    } else {
+        const bool noTrafficYet = rocketLastPacketMs == 0 && nowMs >= 3000u;
+        const bool staleTraffic = rocketLastPacketMs != 0 &&
+                                  (uint32_t)(nowMs - rocketLastPacketMs) >
+                                      groundSettingsLinkLostMs();
+        if ((noTrafficYet || staleTraffic) &&
+            (uint32_t)(nowMs - lastRadioRearmMs) >= 2000u) {
+            lastRadioRearmMs = nowMs;
+            groundRadioRearmCount++;
+            radio_applySettings();
+        }
+    }
+
+    // Poll LoRa from the main loop so radio SPI access cannot interrupt TFT or
+    // SD transactions on the shared bus.
+    int packetSize = groundLoraOk ? LoRa.parsePacket() : 0;
+    if (packetSize > 0) {
+        radio_onReceive(packetSize);
+        LoRa.receive();
+    }
 
     // Ground GPS:
     // Always feed TinyGPS++ with incoming bytes so it can parse sentences,
@@ -437,8 +514,8 @@ void radio_update() {
     gndGpsPassed = gps.passedChecksum();
     gndGpsFailed = gps.failedChecksum();
     gndGpsSentencesWithFix = gps.sentencesWithFix();
-    gndGpsLocValid = gps.location.isValid();
-    gndGpsAltValid = gps.altitude.isValid();
+    gndGpsLocValid = gps.location.isValid() && gps.location.age() <= GND_GPS_STALE_MS;
+    gndGpsAltValid = gps.altitude.isValid() && gps.altitude.age() <= GND_GPS_STALE_MS;
     gndGpsDateValid = gps.date.isValid();
     gndGpsTimeValid = gps.time.isValid();
 
@@ -505,9 +582,8 @@ void radio_update() {
         pyroConfigPending = false;
         interrupts();
 
-        if (pkt.version == 1) {
-            rocketLastPacketMs = millis();
-            lastPyroConfigPacketMs = rocketLastPacketMs;
+        if (pkt.version == 1 && pkt.channel_count <= 4) {
+            lastPyroConfigPacketMs = millis();
             rocketPyroConfigValid = true;
             rocketPyroChannelCount = pkt.channel_count > 4 ? 4 : pkt.channel_count;
             rocketPyroOutputEnabled = pkt.output_enabled;
@@ -534,9 +610,9 @@ void radio_update() {
         pyroEventPending = false;
         interrupts();
 
-        if (pkt.version == 1) {
-            rocketLastPacketMs = millis();
-            lastPyroEventPacketMs = rocketLastPacketMs;
+        if (pkt.version == 1 && isValidRocketState(pkt.state) &&
+            pkt.channel_index < 4) {
+            lastPyroEventPacketMs = millis();
             rocketLastPyroEventType = pkt.event_type;
             rocketLastPyroEventChannel = pkt.channel_index;
             rocketLastPyroEventFunction = pkt.function;
@@ -556,23 +632,49 @@ void radio_update() {
         flightPending = false;
         interrupts();
 
-        rocketLastPacketMs = millis();
-        lastFlightPacketMs = rocketLastPacketMs;
-        flightRxCount++;
-        flightRxCountWindow++;
-        updateSeqStats(pkt.seq, haveFlightSeq, lastFlightSeq, flightMissedCount);
-        rocketLaunched = (pkt.flags & FLAG_LAUNCH);
-        rocketLanded   = (pkt.flags & FLAG_LANDED);
-        rktFlags       = pkt.flags;
-        rktAltBaroM    = pkt.alt_cm / 100.0f;
-        rktVelMs       = pkt.vel_cms / 100.0f;
-        rocketFlightState = (RocketFlightState)pkt.state;
+        if (isValidFlightPacket(pkt)) {
+            rocketLastPacketMs = millis();
+            lastFlightPacketMs = rocketLastPacketMs;
+            flightRxCount++;
+            flightRxCountWindow++;
+            updateSeqStats(pkt.seq, haveFlightSeq, lastFlightSeq, flightMissedCount);
+            rktFlags       = pkt.flags;
+            rktAltBaroM    = pkt.alt_cm / 100.0f;
+            rktVelMs       = pkt.vel_cms / 100.0f;
+            rocketFlightState = (RocketFlightState)pkt.state;
 
-        rocketImuOk  = true;
-        rocketBaroOk = true;
+            const bool flightEvidence =
+                (pkt.flags & FLAG_LAUNCH) != 0 ||
+                (pkt.state >= FS_ASCENT && pkt.state <= FS_POST_FLIGHT_GROUND);
+            if (flightEvidence) {
+                if (rocketFlightEvidencePackets < ROCKET_FLIGHT_CONFIRM_PACKETS) {
+                    rocketFlightEvidencePackets++;
+                }
+                if (rocketFlightEvidencePackets >= ROCKET_FLIGHT_CONFIRM_PACKETS) {
+                    rocketLaunched = true;
+                }
+            } else {
+                rocketFlightEvidencePackets = 0;
+            }
 
-        debugFlightPacket();
-        ui_markDirty();
+            const bool landedEvidence =
+                (pkt.flags & FLAG_LANDED) != 0 ||
+                pkt.state == FS_POST_FLIGHT_GROUND ||
+                pkt.state == FS_LANDED;
+            if (rocketLaunched && landedEvidence) {
+                if (rocketLandedEvidencePackets < ROCKET_LANDED_CONFIRM_PACKETS) {
+                    rocketLandedEvidencePackets++;
+                }
+                if (rocketLandedEvidencePackets >= ROCKET_LANDED_CONFIRM_PACKETS) {
+                    rocketLanded = true;
+                }
+            } else {
+                rocketLandedEvidencePackets = 0;
+            }
+
+            debugFlightPacket();
+            ui_markDirty();
+        }
     }
 
     // Nav packet
@@ -582,23 +684,26 @@ void radio_update() {
         navPending = false;
         interrupts();
 
-        rocketLastPacketMs = millis();
-        lastNavPacketMs = rocketLastPacketMs;
-        navRxCount++;
-        navRxCountWindow++;
-        updateSeqStats(pkt.seq, haveNavSeq, lastNavSeq, navMissedCount);
+        if (isValidNavPacket(pkt)) {
+            rocketLastPacketMs = millis();
+            lastNavPacketMs = rocketLastPacketMs;
+            navRxCount++;
+            navRxCountWindow++;
+            updateSeqStats(pkt.seq, haveNavSeq, lastNavSeq, navMissedCount);
 
-        rktFixType   = pkt.gps_fix_type;
-        rktSats      = pkt.gps_sats;
-        rktHdop      = pkt.gps_hdop_x10 / 10.0f;
-        rktLat       = pkt.gps_lat_e7 / 1e7;
-        rktLon       = pkt.gps_lon_e7 / 1e7;
-        rktAltGpsM   = pkt.gps_alt_cm / 100.0f;
-        rktAltBaroM  = pkt.baro_alt_cm / 100.0f;
-        rocketHasFix = (rktFixType >= 2);
+            rktFixType   = pkt.gps_fix_type;
+            rktSats      = pkt.gps_sats;
+            rktHdop      = pkt.gps_hdop_x10 / 10.0f;
+            rktLat       = pkt.gps_lat_e7 / 1e7;
+            rktLon       = pkt.gps_lon_e7 / 1e7;
+            rktAltGpsM   = pkt.gps_alt_cm / 100.0f;
+            rktAltBaroM  = pkt.baro_alt_cm / 100.0f;
+            rocketHasFix = (rktFixType >= 2) &&
+                           pkt.last_fix_age_ms <= GND_GPS_STALE_MS;
 
-        debugNavPacket();
-        ui_markDirty();
+            debugNavPacket();
+            ui_markDirty();
+        }
     }
 
     if (statusPending) {
@@ -607,33 +712,63 @@ void radio_update() {
         statusPending = false;
         interrupts();
 
-        rocketStatusLastMs = millis();
-        lastStatusPacketMs = rocketStatusLastMs;
-        statusRxCount++;
-        statusRxCountWindow++;
-        updateSeqStats(pkt.seq, haveStatusSeq, lastStatusSeq, statusMissedCount);
-        rocketFlightState = (RocketFlightState)pkt.state;
-        rocketBattV = pkt.batt_mv / 1000.0f;
-        rktSats = pkt.gps_sats;
-        rocketLaunchStatus = pkt.launch_status;
-        rocketLaunchWaitS = pkt.launch_wait_s;
-        rocketBaroOk = (pkt.health_flags & HEALTH_BARO_OK);
-        rocketImuOk  = (pkt.health_flags & HEALTH_IMU_OK);
-        rocketGpsOk  = (pkt.health_flags & HEALTH_GPS_OK);
-        rocketSdOk   = (pkt.health_flags & HEALTH_SD_OK);
-        rocketNandOk = (pkt.health_flags & HEALTH_NAND_OK);
-        rocketLogOk  = (pkt.health_flags & HEALTH_LOG_OK);
-        updateRocketBatteryStatusFromVoltage();
-        if ((pkt.health_flags & HEALTH_BATT_OK) == 0 && rocketBattOk) {
-            rocketBattWarn = true;
-            rocketBattOk = false;
+        if (isValidStatusPacket(pkt)) {
+            rocketStatusLastMs = millis();
+            rocketLastPacketMs = rocketStatusLastMs;
+            lastStatusPacketMs = rocketStatusLastMs;
+            statusRxCount++;
+            statusRxCountWindow++;
+            updateSeqStats(pkt.seq, haveStatusSeq, lastStatusSeq, statusMissedCount);
+            rocketFlightState = (RocketFlightState)pkt.state;
+            rocketBattV = pkt.batt_mv / 1000.0f;
+            rktSats = pkt.gps_sats;
+            rocketLaunchStatus = pkt.launch_status;
+            rocketLaunchWaitS = pkt.launch_wait_s;
+            rocketBaroOk = (pkt.health_flags & HEALTH_BARO_OK);
+            rocketImuOk  = (pkt.health_flags & HEALTH_IMU_OK);
+            rocketGpsOk  = (pkt.health_flags & HEALTH_GPS_OK);
+            rocketSdOk   = (pkt.health_flags & HEALTH_SD_OK);
+            rocketNandOk = (pkt.health_flags & HEALTH_NAND_OK);
+            rocketLogOk  = (pkt.health_flags & HEALTH_LOG_OK);
+            updateRocketBatteryStatusFromVoltage();
+            if ((pkt.health_flags & HEALTH_BATT_OK) == 0 && rocketBattOk) {
+                rocketBattWarn = true;
+                rocketBattOk = false;
+            }
+
+            const bool coherentSafeReset =
+                (pkt.state == FS_IDLE || pkt.state == FS_PAD) &&
+                pkt.launch_status == LAUNCH_STATUS_SAFE;
+            if (coherentSafeReset) {
+                if (rocketSafeResetStatusPackets <
+                    ROCKET_SAFE_RESET_CONFIRM_STATUS_PACKETS) {
+                    rocketSafeResetStatusPackets++;
+                }
+                if (rocketSafeResetStatusPackets >=
+                    ROCKET_SAFE_RESET_CONFIRM_STATUS_PACKETS) {
+                    rocketLaunched = false;
+                    rocketLanded = false;
+                    rocketFlightEvidencePackets = 0;
+                    rocketLandedEvidencePackets = 0;
+                    rktMaxAltM = 0.0f;
+                    rktMaxVelMs = 0.0f;
+                    if (isReasonableRocketBaroAlt(rktAltBaroM)) {
+                        rktBaseAltM = rktAltBaroM;
+                    }
+                }
+            } else {
+                rocketSafeResetStatusPackets = 0;
+            }
+
+            debugStatusPacket();
+            ui_markDirty();
         }
-        debugStatusPacket();
-        ui_markDirty();
     }
 
     // Capture pad altitude before or at launch for relative AGL
-    if (!rocketLaunched) {
+    const bool stateIsPreflight =
+        rocketFlightState == FS_IDLE || rocketFlightState == FS_PAD;
+    if (!rocketLaunched && stateIsPreflight) {
         if (isReasonableRocketBaroAlt(rktAltBaroM)) {
             rktBaseAltM = rktAltBaroM;
         }
@@ -669,16 +804,19 @@ FlightPhase radio_getPhase() {
 
     uint32_t age = millis() - rocketLastPacketMs;
 
-    if (age > LINK_LOST_MS) return PHASE_LOST;
-    if (!rocketLaunched)    return PHASE_PREFLIGHT;
-    if (rocketLanded)       return PHASE_RECOVERY;
-    return PHASE_FLIGHT;
+    if (age > groundSettingsLinkLostMs()) return PHASE_LOST;
+    if (rocketLanded) return PHASE_RECOVERY;
+    if (rocketLaunched) return PHASE_FLIGHT;
+    return PHASE_PREFLIGHT;
 }
 
 void radio_resetState() {
     rocketHasFix = false;
     rocketLaunched = false;
     rocketLanded = false;
+    rocketFlightEvidencePackets = 0;
+    rocketLandedEvidencePackets = 0;
+    rocketSafeResetStatusPackets = 0;
     rocketLastPacketMs = 0;
 
     rktLat = 0.0;
@@ -738,7 +876,7 @@ void radio_resetState() {
     rocketBattWarn = false;
     rocketBattCrit = false;
     rocketStatusLastMs = 0;
-    rocketLaunchStatus = LAUNCH_STATUS_INHIBIT;
+    rocketLaunchStatus = LAUNCH_STATUS_BOOT_WAIT;
     rocketLaunchWaitS = 0;
     rocketPyroConfigValid = false;
     rocketPyroFlashPending = false;

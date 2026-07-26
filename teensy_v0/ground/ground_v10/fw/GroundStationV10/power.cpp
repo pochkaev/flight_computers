@@ -9,7 +9,7 @@ HardwareSerial &pwrSerial = PWR_RS485_SERIAL;
 
 // Timing
 // TX period kept safely below Power module's LINK_TIMEOUT_MS (300 ms).
-static const uint16_t TX_PERIOD_MS   = 150;
+static const uint16_t TX_PERIOD_MS   = 100;
 static const uint16_t POLL_PERIOD_MS = 300;
 static const uint16_t LINK_FRESH_MS  = 500;
 static const uint16_t FAST_BLINK_MS  = 120;
@@ -22,12 +22,16 @@ uint32_t lastTxMs=0, lastPollMs=0, lastBlinkMs=0, lastStatusMs=0;
 uint32_t tRate=0;
 uint16_t rxCount=0, rxCountLast=0;
 uint16_t pwr_rxRate=0;
+uint16_t pwr_lastTxGapMs=0;
+uint16_t pwr_maxTxGapMs=0;
 bool blink=false;
 uint8_t seq=0;
 
 bool pwr_armA_seen=false, pwr_onA=false, pwr_armB_seen=false, pwr_onB=false;
 bool pwr_key_ok=false, pwr_presA=false, pwr_presB=false;
 bool pwr_faultAny=false;
+bool pwr_armA_valid=false, pwr_armB_valid=false;
+bool pwr_armA_rearmRequired=false, pwr_armB_rearmRequired=false;
 
 uint8_t pwr_vbat_x10=0, pwr_ia_x10=0, pwr_ib_x10=0;
 float   pwr_localVbat=0.0f;
@@ -68,7 +72,7 @@ static uint32_t armBuzzerPatternStartMs=0;
 static uint8_t armBuzzerPattern=0;
 
 bool power_link_fresh() {
-    return (millis() - lastStatusMs) < LINK_FRESH_MS;
+    return lastStatusMs != 0 && (millis() - lastStatusMs) < LINK_FRESH_MS;
 }
 
 static void buzzerWrite(bool on, uint16_t freqHz = 2400) {
@@ -125,7 +129,15 @@ static bool updateArmBuzzerEdgePattern(uint32_t now, uint16_t &freq) {
   return on;
 }
 
-static void updateArmBuzzer(uint32_t now, bool anyArm, bool anyStart) {
+static void updateArmBuzzer(uint32_t now, bool enabled, bool anyArm, bool anyStart) {
+  if (!enabled) {
+    armBuzzerPrevArmed = false;
+    armBuzzerArmedSinceMs = 0;
+    armBuzzerPattern = 0;
+    buzzerWrite(false);
+    return;
+  }
+
   if (anyArm && !armBuzzerPrevArmed) {
     armBuzzerArmedSinceMs = now;
     startArmBuzzerPattern(1);
@@ -359,7 +371,7 @@ static void logPowerFireSample(bool armA_sw,
            "key=%d,presA=%d,presB=%d,fault=%d,"
            "armA_sw=%d,startA_btn=%d,startA_ok=%d,armA_seen=%d,onA=%d,"
            "armB_sw=%d,startB_btn=%d,startB_ok=%d,armB_seen=%d,onB=%d,"
-           "link=%d,rx_rate=%u,time_src=%s,time_valid=%u",
+           "link=%d,rx_rate=%u,tx_gap_ms=%u,tx_gap_max_ms=%u,time_src=%s,time_valid=%u",
            pwrFireEventName,
            (unsigned int)pwrFireLogEvent,
            (unsigned int)pwrFireLogSample++,
@@ -390,6 +402,8 @@ static void logPowerFireSample(bool armA_sw,
            pwr_onB ? 1 : 0,
            power_link_fresh() ? 1 : 0,
            (unsigned int)pwr_rxRate,
+           (unsigned int)pwr_lastTxGapMs,
+           (unsigned int)pwr_maxTxGapMs,
            timekeeper_source_name(),
            timekeeper_hasTime() ? 1u : 0u);
   sdlog_write_now(line);
@@ -492,7 +506,8 @@ void power_init() {
     analogReadAveraging(32);
 #endif
 
-    lastTxMs = lastPollMs = lastBlinkMs = lastStatusMs = millis();
+    lastTxMs = lastPollMs = lastBlinkMs = millis();
+    lastStatusMs = 0;
 }
 
 void power_update() {
@@ -513,32 +528,74 @@ void power_update() {
   bool armB_sw    = (digitalRead(PWR_ARM_B_PIN)==LOW);
   bool startA_btn = (digitalRead(PWR_START_A_PIN)==LOW);
   bool startB_btn = (digitalRead(PWR_START_B_PIN)==LOW);
-  updateArmBuzzer(now, armA_sw || armB_sw, startA_btn || startB_btn);
+
+  // ARM may remain active for a long pad wait, so it must not accumulate an
+  // unbounded RAM log. Defer SD operations only during START, acknowledged
+  // output, and the bounded 3 s fire-sampling window. Rocket status controls
+  // log cadence; it does not control launcher safety or this fire window.
+  sdlog_setLaunchCritical(startA_btn || startB_btn ||
+                          pwr_onA || pwr_onB || pwrFireLogActive);
+
+  const bool linkFresh = power_link_fresh();
+
+  // A raw ARM transition is accepted only while a valid Power-module link is
+  // already present. Link loss while armed, or arming while disconnected,
+  // latches REARM until the operator returns the channel to SAFE.
+  if (!linkFresh) {
+    pwr_armA_valid = false;
+    pwr_armB_valid = false;
+    if (armA_sw) pwr_armA_rearmRequired = true;
+    if (armB_sw) pwr_armB_rearmRequired = true;
+  }
+  if (!armA_sw) {
+    pwr_armA_valid = false;
+    pwr_armA_rearmRequired = false;
+  } else if (linkFresh && !prevArmA && !pwr_armA_rearmRequired) {
+    pwr_armA_valid = true;
+  }
+  if (!armB_sw) {
+    pwr_armB_valid = false;
+    pwr_armB_rearmRequired = false;
+  } else if (linkFresh && !prevArmB && !pwr_armB_rearmRequired) {
+    pwr_armB_valid = true;
+  }
+
+  const bool effectiveArmA = linkFresh && armA_sw && pwr_armA_valid;
+  const bool effectiveArmB = linkFresh && armB_sw && pwr_armB_valid;
+  updateArmBuzzer(now, linkFresh, effectiveArmA || effectiveArmB,
+                  (effectiveArmA && startA_btn) || (effectiveArmB && startB_btn));
 
   // Safety: require START release after arming
-  if (armA_sw && !prevArmA) { okToIgniteA = !startA_btn; }
-  if (!armA_sw)             { okToIgniteA = false; }
-  if (!startA_btn)          { okToIgniteA = armA_sw; }
+  static bool prevEffectiveArmA=false;
+  static bool prevEffectiveArmB=false;
+  if (effectiveArmA && !prevEffectiveArmA) { okToIgniteA = !startA_btn; }
+  if (!effectiveArmA)                       { okToIgniteA = false; }
+  if (!startA_btn)                          { okToIgniteA = effectiveArmA; }
 
-  if (armB_sw && !prevArmB) { okToIgniteB = !startB_btn; }
-  if (!armB_sw)             { okToIgniteB = false; }
-  if (!startB_btn)          { okToIgniteB = armB_sw; }
+  if (effectiveArmB && !prevEffectiveArmB) { okToIgniteB = !startB_btn; }
+  if (!effectiveArmB)                       { okToIgniteB = false; }
+  if (!startB_btn)                          { okToIgniteB = effectiveArmB; }
 
   prevArmA=armA_sw;
   prevArmB=armB_sw;
+  prevEffectiveArmA=effectiveArmA;
+  prevEffectiveArmB=effectiveArmB;
 
   // Track overall arm state and latest arm-on edge time
-  bool anyArm = armA_sw || armB_sw;
+  bool anyArm = effectiveArmA || effectiveArmB;
   static bool prevAnyArm=false;
   if (anyArm && !prevAnyArm) {
     pwr_lastArmOnMs = now;
+    // Make the logged maximum directly describe the current ARM/START test,
+    // rather than retaining an unrelated SD/UI stall from earlier idle time.
+    pwr_maxTxGapMs = pwr_lastTxGapMs;
   }
   pwr_anyArmed = anyArm;
   prevAnyArm = anyArm;
 
   // Desired START, block if key missing or fault active
-  bool desiredA = armA_sw && startA_btn && okToIgniteA && pwr_key_ok && !pwr_faultAny;
-  bool desiredB = armB_sw && startB_btn && okToIgniteB && pwr_key_ok && !pwr_faultAny;
+  bool desiredA = effectiveArmA && startA_btn && okToIgniteA && pwr_key_ok && !pwr_faultAny;
+  bool desiredB = effectiveArmB && startB_btn && okToIgniteB && pwr_key_ok && !pwr_faultAny;
 
   // Master-side fire timeout (10 s)
   if (desiredA && !prevDesiredA) m_tStartA = now;
@@ -596,16 +653,19 @@ void power_update() {
         digitalWrite(pin, HIGH);
       }
     };
-    driveLed(armA_sw, startA_btn && !m_fireTimeoutA, pwr_onA, PWR_LED_A_PIN);
-    driveLed(armB_sw, startB_btn && !m_fireTimeoutB, pwr_onB, PWR_LED_B_PIN);
+    driveLed(effectiveArmA, startA_btn && !m_fireTimeoutA, pwr_onA, PWR_LED_A_PIN);
+    driveLed(effectiveArmB, startB_btn && !m_fireTimeoutB, pwr_onB, PWR_LED_B_PIN);
   }
 
   // Periodic TX to Power (state + occasional poll)
   if(now - lastTxMs >= TX_PERIOD_MS){
+    const uint32_t txGapMs = now - lastTxMs;
+    pwr_lastTxGapMs = txGapMs > 65535u ? 65535u : (uint16_t)txGapMs;
+    if (pwr_lastTxGapMs > pwr_maxTxGapMs) pwr_maxTxGapMs = pwr_lastTxGapMs;
     lastTxMs = now;
     bool doPoll = (now - lastPollMs >= POLL_PERIOD_MS);
     if(doPoll) lastPollMs = now;
-    sendMasterFrame(doPoll, armA_sw, startA_ok, armB_sw, startB_ok);
+    sendMasterFrame(doPoll, effectiveArmA, startA_ok, effectiveArmB, startB_ok);
   }
 
   // Local battery measurement for UI/logging: 2s moving average, updated at 20 Hz.

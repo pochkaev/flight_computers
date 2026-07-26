@@ -4,6 +4,7 @@ Firmware:
 
 - [RocketV10.ino](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/RocketV10.ino)
 - [config.h](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/config.h)
+- [FLIGHT_LOGGING.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/FLIGHT_LOGGING.md)
 - [PYRO.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/PYRO.md)
 - [AI_CONTEXT.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/AI_CONTEXT.md)
 - [NEXT_STEPS.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/NEXT_STEPS.md)
@@ -17,8 +18,9 @@ This firmware runs on the rocket flight computer and:
 - reads the optional LSM9DS1 IMU over I2C
 - reads the GT-U7 GPS on `Serial1`
 - measures battery voltage on `A0`
-- logs flight data to the Teensy 4.1 built-in SD card
-- initializes optional QSPI NAND memory through `LittleFS_QPINAND`
+- records flight data to timing-safe RAM and commits it to QSPI NAND through
+  `LittleFS_QPINAND`
+- uses the Teensy 4.1 built-in SD card for optional field export/service
 - sends flight, navigation, status, and identity telemetry over LoRa
 
 ## Current v10 improvements
@@ -71,7 +73,7 @@ Compared with `rocket_v8`, `rocket_v10` currently adds:
   - V4 service export supports both full `_imu.csv` export and quick latest-only full-state export
 - versioned NAND metadata headers with record counts, finalization state, firmware version, rocket name, configured rates, IMU ranges, and estimator version
 - current-only NAND export; old/legacy NAND formats are intentionally not decoded by the firmware
-- post-landing low-rate recovery logging instead of immediate log shutdown
+- finalizes the onboard flight log immediately on `LANDED` or `ABORT`
 - corrected LED-mode refresh in the main loop so transient stale sensor windows do not leave the status LED stuck in error mode
 - LoRa telemetry scheduler sends at most one packet per loop, with priority:
   - identity
@@ -79,10 +81,8 @@ Compared with `rocket_v8`, `rocket_v10` currently adds:
   - nav
   - flight
   This prevents the high-rate flight packet stream from starving status/nav telemetry.
-- rocket name can be set from SD without recompiling:
-  - file: `/rocket_config.txt`
-  - key: `rocket_name`
-  - sent to ground in the LoRa identity packet
+- legacy SD configuration support exists, but runtime SD configuration loading
+  is disabled in the current flight build
 - flight builds should use `SERIAL_DEBUG_LEVEL = 0` so USB serial output is quiet during flight use
 
 These changes are meant to reduce false state changes and battery-status flapping on the bench and in flight.
@@ -100,10 +100,17 @@ The rocket firmware is now structured so USB serial is optional and not part of 
 - navigation telemetry runs at `1 Hz`
 - status telemetry runs at `0.5 Hz`
 - identity telemetry runs every `5 s`
-- SD CSV logging runs at `5 Hz`
-- NAND binary logging writes `50 Hz` full-state records plus `200 Hz` compact IMU records
-- SD and NAND flush run at `1 Hz`
+- runtime SD CSV logging is disabled
+- NAND binary records are buffered in RAM once armed: `10 Hz` full-state,
+  `50 Hz` barometer, `200 Hz` compact IMU normally, and `50 Hz` IMU during
+  descent states
+- flight RAM is committed and the NAND file finalized at `LANDED`, `ABORT`, or
+  explicit physical-SAFE service
 - serial debug runs only when `SERIAL_DEBUG_LEVEL > 0`
+
+See [FLIGHT_LOGGING.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/FLIGHT_LOGGING.md)
+for the exact per-state record flow, buffer behavior, finalization conditions,
+SD policy, EEPROM contents, and serial commands.
 
 This is intended for flight use:
 
@@ -112,6 +119,12 @@ This is intended for flight use:
 - `SERIAL_DEBUG_LEVEL = 2` for full bench debugging
 
 Serial output is diagnostic only. LoRa telemetry, sensor updates, and storage logging do not depend on a USB serial connection.
+
+For SAFE/PAD field service, use `tools/flight_storage.py`. It lists NAND/SD
+files and downloads raw files in checksummed 1024-byte frames. Re-run a
+download with `--resume` to continue from the existing local file size. Rocket
+rejects these commands unless the physical SAFE switch is present and the
+state is IDLE/PAD; it also aborts an active transfer if SAFE is removed.
 
 ## Status LED
 
@@ -130,13 +143,18 @@ Do not use the built-in LED on `pin 13` for this status flow because `D13` is al
 
 LED patterns:
 
-- slow blink: boot and initialization
-- heartbeat pulse: normal ready state
-- fast blink: service mode running from SD command file
-- solid on: service mode completed successfully
-- 2 short blinks repeating: SD failure
-- 3 short blinks repeating: NAND failure
-- fast 250 ms blink: general hardware fault
+- short `80 ms` pulse every `2 s`: physical SAFE and flight-critical hardware healthy
+- slow `500 ms` on/off blink: ARM requested but pad verification is not READY
+- solid on: READY, LAUNCH CHECK, or active flight
+- very fast `100 ms` on/off blink: critical fault, do not launch
+- finder pattern synchronized with the buzzer: touchdown/LANDED
+- 2 short blinks repeating: storage/service operation
+- slow blink during initial boot
+
+Critical LED faults are IMU/barometer/NAND/logger/LoRa failure, stale IMU or
+barometer data, critical battery, ABORT, or exhaustion of the critical recorder
+reserve. Missing SD, missing GPS, battery warning, normal packet loss, and a
+short rejected LAUNCH CHECK do not create the critical LED pattern.
 
 ## Buzzer and service button
 
@@ -171,8 +189,9 @@ Buzzer behavior:
   - 3 to 10 minutes: slower double-beep beacon
   - after 10 minutes: slow single long beep to save battery
 - short button press: silence the landed finder beep
-- long button press, about 2 seconds: close the current log, reset flight state, refresh the current pad baseline, prepare for the next flight attempt, and play a rising confirmation melody
-- long button press is ignored during active flight states such as `ASCENT`, `COAST`, `DESCENT_BALLISTIC`, `UNDER_DROGUE`, and deploy-log states
+- long button press, about 2 seconds, while physical SAFE is recognized: stop outputs, commit and close the current NAND log, play a short acknowledgement, and reset the complete Teensy
+- the SAFE long-press reboot is available from any flight state so a false bench transition can always be recovered without removing power
+- long button press is refused while ARM is applied; the refusal plays the low warning pattern and does not change logs or flight state
 
 ## Electrical notes
 
@@ -199,9 +218,11 @@ I checked the rocket firmware against the ground receiver:
   - `2S`: battery warning below `6.8 V`, critical below `6.4 V`
 - ground currently derives rocket battery `OK/WARN/CRIT` from `batt_mv`, matching these thresholds
 
-## SD config
+## Legacy SD config
 
-The rocket reads an optional config file from the SD root at boot:
+The parser for an optional config file remains in the source, but the current
+flight build uses `SD_CONFIG_LOAD_ENABLE=0` and does not load it. If that
+feature is deliberately re-enabled, the expected file is:
 
 ```text
 /rocket_config.txt
@@ -250,6 +271,7 @@ Rules:
     LSM9DS1 SCL<--> | D19 / SCL            |
                     |                      |
     VBAT divider -->| A0                   |
+    SAFE/ARM NC --->| D16                  |
                     |                      |
     QSPI NAND   <--> | native QSPI pads    |
                     |                      |
@@ -277,6 +299,7 @@ Rules:
 | I2C SDA | D18 | MS5607 `SDA`, LSM9DS1 `SDA` | Shared I2C bus |
 | I2C SCL | D19 | MS5607 `SCL`, LSM9DS1 `SCL` | Shared I2C bus |
 | Battery ADC | A0 | Divider midpoint | See battery divider section |
+| SAFE/ARM switch | D16 | Microswitch `NC`; `C` goes to GND | Inserted pin presses lever = SAFE |
 | QSPI NAND memory | Native QSPI interface | `LittleFS_QPINAND` device | Optional, see memory section |
 | SD card | Built-in SD | Teensy 4.1 on-board microSD | `SD.begin(BUILTIN_SDCARD)` |
 
@@ -482,8 +505,10 @@ NAND full handling:
   - `NAND_MIN_FREE_BYTES = 16 MiB`
   - `NAND_MAX_LOG_FILES = 96`
   - `NAND_ROTATE_ENABLE = 1`
-- V4 writes `50 Hz` full-state records plus `200 Hz` compact IMU records, roughly `34 MB/hour`
-- the 16 MiB reserve is roughly 28 minutes of V4 logging headroom
+- V4 writes `10 Hz` full-state, `50 Hz` barometer, and `200 Hz` compact IMU
+  records, with IMU reduced to `50 Hz` during descent states
+- the 16 MiB reserve protects NAND rotation; armed/in-flight capacity is
+  primarily limited by the 576 KiB RAM recorder
 - rotation happens before opening a new log, not in the middle of an active flight log
 
 Important detail:
@@ -497,7 +522,7 @@ So for this firmware:
 
 - LoRa uses the normal SPI pins `D11/D12/D13` plus `D10/D9/D2`
 - NAND memory is a separate native memory interface on the Teensy 4.1 QSPI pads
-- SD logging uses the built-in Teensy 4.1 SD hardware
+- SD export/service uses the built-in Teensy 4.1 SD hardware
 
 Diagram:
 
@@ -687,7 +712,9 @@ The ADC is configured to 12-bit in setup, and `A0` is explicitly set as input in
 
 ## Storage
 
-The rocket logs to the built-in Teensy 4.1 SD slot. In addition, the firmware can detect optional QSPI NAND memory through `LittleFS_QPINAND`.
+The rocket records through RAM to native QSPI NAND. The built-in Teensy 4.1 SD
+slot is an optional export/service destination and is not used by the runtime
+flight logger.
 
 Diagram:
 
@@ -707,6 +734,76 @@ RocketV10 firmware
 - GPS does not control the flight state machine, but it is logged as a secondary altitude reference
 - magnetometer and approximate yaw are logged for visualization only
 - flight data is logged to CSV on the built-in SD card
+
+## Test-flight build `rv10.20260724g`
+
+This build adds EEPROM-backed USB serial configuration at `115200` baud.
+`SHOW` and `HELP` are always available. `SET`, `SAVE`, and `DEFAULTS` are
+accepted only while the physical SAFE input is active and the flight state is
+`IDLE` or `PAD`.
+
+Supported settings are:
+
+- RF: `LORA_SF` (`6..10`), `LORA_BW` (`62500`, `125000`, `250000`, or
+  `500000`), `LORA_CR` (`5..8`), and `TX_POWER_DBM` (`2..17`)
+- telemetry: `FLIGHT_TX_MS` (`200..5000`), `NAV_TX_MS` (`500..10000`), and
+  `STATUS_TX_MS` (`500..10000`)
+- flight detection/logging: `LAUNCH_ACCEL_G`, `LAUNCH_IMU_CONFIRM_MS`,
+  `LAUNCH_BARO_ALT_M`, `LAUNCH_BARO_VEL_MPS`, `APOGEE_MIN_ALT_M`, and
+  `MAIN_ALT_M`
+
+Example:
+
+```text
+SHOW
+SET FLIGHT_TX_MS 200
+SET LAUNCH_ACCEL_G 1.35
+SAVE
+```
+
+RF changes apply immediately and must also be made on Ground. Higher spreading
+factors enforce a slower minimum flight packet period to prevent an impossible
+airtime schedule. No serial command exists to enable/fire pyros, change pyro
+pins, or bypass the physical SAFE workflow.
+
+Rocket retries LoRa initialization every two seconds if the radio is not found
+at boot. `SHOW` reports radio state and transmit sequence counters.
+
+Rocket log deletion is available over USB serial only while physical SAFE is
+active and the state is `IDLE` or `PAD`. The final `CONFIRM` token is required:
+
+```text
+ERASE NAND CONFIRM
+ERASE SD CONFIRM
+ERASE ALL CONFIRM
+```
+
+`ERASE SD` removes only recognized `rocket_flight*.csv`, legacy `flight*.csv`,
+and `rocket_nand_*.csv` log/export files. It preserves Rocket configuration,
+service-request/result, and filesystem-test files. `ERASE NAND` removes only
+recognized Rocket binary flight logs. Active logs are closed cleanly and new
+logs begin automatically afterward.
+
+This build keeps the physical SAFE/ARM workflow, latched READY behavior, and
+log-only pyro configuration unchanged. Reliability/data changes:
+
+- flight-state work now runs independently of successful barometer conversions,
+  so fresh IMU acceleration can confirm launch during a barometer delay/failure
+- cached IMU acceleration cannot satisfy the 50 ms launch confirmation after
+  IMU updates stop
+- non-finite or physically impossible IMU/barometer samples do not refresh
+  sensor freshness
+- GPS validity requires a recent TinyGPS++ location/altitude update
+- LoRa payload CRC is disabled and a stuck asynchronous transmission is cleared
+  after one second
+- the paired flight-link profile restores the original SF7 / 125 kHz /
+  CR 4:5 at 17 dBm, with Flight packets at 5 Hz
+- telemetry integer fields saturate instead of wrapping
+- high-rate NAND IMU data uses a new typed wide-gyro record with 32-bit
+  millidegree/s fields, covering the configured +/-2000 dps range
+- pyro output-off servicing runs before storage as well as after it
+
+Physical pyro outputs remain disabled.
 
 ## Build and upload
 
@@ -771,15 +868,42 @@ Main rocket log/telemetry values:
 | `gps_base_alt` | GPS altitude baseline captured on pad. |
 | `baro_gps_delta` | Difference between barometric relative altitude and GPS relative altitude. |
 | `baro_gps_diverge` | Diagnostic flag when baro/GPS altitude disagreement is large. Not a flight-state trigger. |
-| `diag_flags` | Bitmask for diagnostics: bit `0` baro/GPS divergence, bit `1` attitude accel correction active, bit `2` attitude mag correction active, bit `3` attitude gyro-only mode. |
+| `diag_flags` | Bitmask: bit `0` baro/GPS divergence; bits `1–3` attitude correction modes; bit `4` SAFE input; bit `5` SAFE observed since boot; bit `6` launch candidate; bit `7` touchdown candidate. |
 | `mx/my/mz` | Magnetometer values from LSM9DS1. Logged for visualization. |
 | `roll/pitch/yaw` | Approximate orientation values derived from the internal quaternion estimator. Yaw is magnetometer-aided when correction is active and remains visualization-only. |
 | `batt_mv` | Battery voltage sent to ground in millivolts. |
 | `health_flags` | Bitmask for barometer, IMU, GPS, SD, NAND, log, and battery health. |
 
-Launch detection is armed only after the power-on inhibit has expired and the rocket has been still for the configured pad-still interval. When that gate arms, the barometer baseline is refreshed at the pad. Launch detection then accepts either a calibrated `-Z` nose-axis acceleration launch, a stronger barometer altitude/velocity launch, or an obvious-flight fallback. This follows the same practical idea as larger HPR flight computers: use a fast liftoff signal when available, but do not miss flight when acceleration is lower than expected and the barometer clearly shows climb.
+Launch arming uses a removable SAFE pin and D16 microswitch input. Wire switch `C`
+to GND and `NC` to D16. The input uses `INPUT_PULLUP`: inserted pin/pressed
+lever is HIGH/SAFE, and removed pin/released lever is LOW/ARM. After every boot,
+firmware must observe SAFE for at least the debounce interval before it will
+accept a later SAFE-to-ARM transition. Powering on while the pin is temporarily
+removed therefore remains inhibited even after the 60 s boot timer.
 
-Recovery classification is also HPR-inspired. It can recover missed coast/descent/post-flight states from sustained barometer patterns and stillness checks, and it logs simulated dual-deploy apogee/main charge events to `_event.csv`. With the default safe configuration, these events are records only; the firmware holds deployment outputs inactive and does not pulse them. GPS, yaw, and magnetometer data are not used for launch, apogee, recovery, or landed decisions.
+The telemetry launch-status byte reports the specific readiness reason rather
+than one combined inhibit state: boot countdown, SAFE-required, SAFE, pad
+settle, sensor/log/battery fault, vertical/stillness hold, 10 s arming
+countdown, READY, launch candidate, or active flight. `launch_wait_s` is
+meaningful only for boot, pad-settle, and arming countdown states.
+
+After the SAFE pin is removed at the pad, READY requires 10 s of continuous
+vertical orientation, stillness, healthy/fresh IMU and barometer data, working
+logging, and non-critical battery voltage. READY refreshes the pad baseline and
+then remains latched. Launch-like IMU or barometer evidence enters an internal
+3 s launch-candidate window. Sustained nose-axis acceleration can confirm a
+short D12-class launch without waiting for the barometer; the existing
+barometer and obvious-flight paths remain available. A rejected bump returns
+to READY instead of disarming the rocket.
+
+Recovery classification is also HPR-inspired. It can recover missed
+coast/descent/post-flight states and logs simulated apogee/main charge events
+to `_event.csv`. After descent, a qualified impact or sustained low-altitude,
+low-velocity condition starts the finder before final LANDED confirmation.
+Rolling or dragging no longer has to satisfy the old continuous gyro-stillness
+gate before the flight can finish. Inserting the SAFE pin after
+`POST_FLIGHT_GROUND` or `LANDED` silences the finder. GPS, yaw, and magnetometer
+data are not used for launch, apogee, recovery, or landed decisions.
 
 Pyro channel assignments are HPR-style and configurable in firmware:
 
@@ -805,3 +929,33 @@ Function letters match the HPR idea:
 `PYRO_OUTPUT_ENABLE` is `0` by default in [config.h](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/config.h). With this safe default, the firmware initializes D6/D7/D8/D15 to the inactive level but does not pulse them. Matched channels can still create `_event.csv` records if their `PYRO_CH*_LOG_ENABLE` value is `1`. After external drivers and arming hardware are installed, setting `PYRO_OUTPUT_ENABLE=1` will pulse matched channels for `PYRO_FIRE_MS` and add `PYRO_CHANNEL*_OUTPUT_ON/OFF` events to `_event.csv`.
 
 Do not connect an e-match directly to a Teensy GPIO. Use a MOSFET/transistor driver, gate/base pulldown, separate current-limited pyro battery, and a physical arming switch.
+
+## 2026-07-25 development recorder
+
+Installed firmware `rv10.20260725f` keeps the filesystem out of PAD/ARM/flight
+timing. A rolling 64 KiB pre-launch window and subsequent flight records are
+held in a 576 KiB RAM buffer, then committed to NAND at LANDED/ABORT or during
+an explicit SAFE service operation. IMU is logged at 200 Hz through coast and
+50 Hz during descent; barometer remains 50 Hz. Runtime SD CSV logging and
+automatic SD configuration loading are disabled.
+
+Useful SAFE/PAD serial commands:
+
+```text
+SHOW
+TIMING
+TIMING RESET
+STORAGE STATUS
+FLIGHT RESET CONFIRM
+NAND LIST
+NAND EXPORT SD ALL SUMMARY
+NAND EXPORT SD <index> FULL
+NAND ERASE ALL CONFIRM
+SD MOUNT
+SD LIST
+SD ERASE LOGS CONFIRM
+```
+
+The RAM design prevents measured LittleFS pauses from delaying flight-state
+evaluation, but uncommitted records are lost on total power failure. Physical
+pyro outputs remain disabled.

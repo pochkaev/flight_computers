@@ -3,7 +3,7 @@
 #include <Arduino.h>
 
 // Firmware identity
-#define ROCKET_FW_VERSION       "rv10.20260509c"
+#define ROCKET_FW_VERSION       "rv10.20260725l"
 #define NAND_RECORD_FORMAT_V4   4
 #define ATTITUDE_ESTIMATOR_VERSION 3
 
@@ -13,6 +13,11 @@
 #define LORA_RST_PIN        9
 #define LORA_DIO0_PIN       2
 #define LORA_SPI_FREQ_HZ    8000000
+#define LORA_TX_TIMEOUT_MS  1000u
+#define LORA_TX_POWER_DBM   17
+#define LORA_SPREADING_FACTOR 7
+#define LORA_SIGNAL_BANDWIDTH_HZ 125000L
+#define LORA_CODING_RATE_DENOMINATOR 5
 
 // GPS GT-U7
 #define GPS_SERIAL          Serial1
@@ -33,6 +38,16 @@
 #define BUTTON_PIN          4
 #define BUTTON_ACTIVE_LOW   1
 #define BUTTON_RESET_HOLD_MS 2000u
+
+// Removable SAFE/ARM pin microswitch.
+// Wiring: switch C -> GND, switch NC -> D16. With INPUT_PULLUP, a pin that
+// presses the lever opens NC and reads HIGH (SAFE); removing the pin closes
+// NC and reads LOW (ARM).
+#define ARM_SWITCH_PIN          16
+#define ARM_SWITCH_SAFE_LEVEL   HIGH
+#define ARM_SWITCH_DEBOUNCE_MS  500u
+#define ARM_SWITCH_DISARM_MS    1000u
+#define ARM_SAFE_BOOT_REQUIRED  1
 #define LANDED_FINDER_BEEP_ENABLE 1
 #define LANDED_FINDER_FAST_MS 180000u
 #define LANDED_FINDER_MEDIUM_MS 600000u
@@ -124,13 +139,28 @@
 #define RECOVERY_NAV_TX_MS    2000
 #define RECOVERY_STATUS_TX_MS 5000
 #define SD_LOG_UPDATE_MS       200
-#define NAND_LOG_UPDATE_MS     20
+#define NAND_LOG_UPDATE_MS     100
 #define NAND_IMU_LOG_UPDATE_MS 5
 #define RECOVERY_SD_LOG_UPDATE_MS 2000
 #define RECOVERY_NAND_LOG_UPDATE_MS 2000
 #define LOG_FLUSH_MS        1000
 #define STATUS_PRINT_MS     1000
 #define LED_UPDATE_MS       50
+
+// Flight-critical recorder policy:
+// - NAND is the in-flight binary black box.
+// - SD remains available for configuration and SAFE-only export, but is not
+//   opened or written by the runtime logger.
+// - The 200 Hz IMU record already contains attitude angles, so the separate
+//   200 Hz quaternion stream is disabled until the recorder is redesigned.
+#define SD_RUNTIME_LOG_ENABLE       0
+#define SD_CONFIG_LOAD_ENABLE       0
+#define NAND_ATTITUDE_LOG_ENABLE    0
+#define NAND_PERIODIC_HEADER_UPDATE 0
+
+// Runtime timing acceptance instrumentation.
+#define FLIGHT_KERNEL_DEADLINE_US 5000u
+#define LOOP_MAJOR_STALL_US      100000u
 
 // NAND log rotation:
 // Before opening a new NAND flight log, delete oldest /fltNNNN.bin files
@@ -142,6 +172,15 @@
 #define NAND_MIN_FREE_BYTES      (16UL * 1024UL * 1024UL)
 #define NAND_MAX_LOG_FILES       96
 #define NAND_LOG_CACHE_BYTES     16384
+
+// LittleFS QSPI writes have measured worst-case pauses near 80 ms. Once
+// physically ARMED, hold flight records in RAM and commit after a terminal
+// state so filesystem latency cannot delay flight-state evaluation.
+#define NAND_FLIGHT_RAM1_BYTES        (160UL * 1024UL)
+#define NAND_FLIGHT_RAM2_BYTES        (416UL * 1024UL)
+#define NAND_PRELAUNCH_RAM_BYTES       (64UL * 1024UL)
+#define NAND_FLIGHT_CRITICAL_RESERVE_BYTES (64UL * 1024UL)
+#define NAND_DESCENT_IMU_LOG_UPDATE_MS 20u
 
 // Sensor freshness windows
 #define BARO_STALE_MS       1500
@@ -174,14 +213,21 @@
 #define LAUNCH_CONFIRM_MS         120
 #define LAUNCH_PAD_SETTLE_MS      2500
 #define LAUNCH_POWERON_INHIBIT_MS 60000u
-#define LAUNCH_PAD_STILL_ARM_MS   30000u
-#define LAUNCH_ARM_MOTION_GRACE_MS 2000u
+#define LAUNCH_PAD_STILL_ARM_MS   10000u
 #define LAUNCH_PAD_STILL_ACCEL_ERR_G 0.20f
 #define LAUNCH_PAD_STILL_GYRO_DPS 12.0f
+#define LAUNCH_PAD_VERTICAL_MIN_G 0.70f
+#define LAUNCH_PAD_VERTICAL_MAX_G 1.30f
+#define LAUNCH_PAD_TRANSVERSE_MAX_G 0.45f
 #define LAUNCH_TREND_MS           150
 #define LAUNCH_TREND_MIN_M        2.50f
+#define LAUNCH_IMU_CONFIRM_MS      50u
+#define LAUNCH_IMU_MIN_DELTA_V_MPS 1.0f
+#define LAUNCH_IMU_EVIDENCE_MAX_AGE_MS 30u
+#define LAUNCH_CANDIDATE_TIMEOUT_MS 3000u
 #define BARO_VEL_WINDOW_MS        120
 #define BARO_MAX_RAW_VEL_MPS      120.0f
+#define BARO_STATE_EVIDENCE_MAX_AGE_MS 80u
 #define COAST_VEL_MPS             5.0f
 #define COAST_MIN_AFTER_LAUNCH_MS 750
 #define COAST_CONFIRM_MS          250
@@ -211,6 +257,12 @@
 #define LANDED_STILL_CONFIRM_MS   3000
 #define LANDED_STILL_ACCEL_ERR_G  0.20f
 #define LANDED_STILL_GYRO_DPS     12.0f
+#define TOUCHDOWN_IMPACT_G        3.0f
+#define TOUCHDOWN_MIN_AFTER_APOGEE_MS 15000u
+#define TOUCHDOWN_SOFT_VEL_MPS    1.5f
+#define TOUCHDOWN_SOFT_CONFIRM_MS 3000u
+#define TOUCHDOWN_POST_FLIGHT_CONFIRM_MS 5000u
+#define TOUCHDOWN_LANDED_CONFIRM_MS 10000u
 
 // GPS as secondary altitude reference:
 // GPS is not used to trigger flight states. It is baselined on the pad,
@@ -223,7 +275,9 @@
 // 0 = disabled for flight
 // 1 = boot + basic status line
 // 2 = boot + verbose sensor/status line for bench debugging
+#ifndef SERIAL_DEBUG_LEVEL
 #define SERIAL_DEBUG_LEVEL  0
+#endif
 
 // Rocket identity
 #define DEFAULT_ROCKET_NAME   "shadow"
@@ -251,7 +305,16 @@
 #define HEALTH_BATT_OK      (1u << 6)
 
 // Launch readiness status sent in the reserved status-packet bytes.
-#define LAUNCH_STATUS_INHIBIT     0
-#define LAUNCH_STATUS_WAIT_STILL  1
-#define LAUNCH_STATUS_READY       2
-#define LAUNCH_STATUS_FLIGHT      3
+#define LAUNCH_STATUS_BOOT_WAIT       0
+#define LAUNCH_STATUS_SAFE_REQUIRED   1
+#define LAUNCH_STATUS_SAFE            2
+#define LAUNCH_STATUS_PAD_SETTLE      3
+#define LAUNCH_STATUS_SENSOR_FAULT    4
+#define LAUNCH_STATUS_LOG_FAULT       5
+#define LAUNCH_STATUS_BATT_CRIT       6
+#define LAUNCH_STATUS_HOLD_VERTICAL   7
+#define LAUNCH_STATUS_HOLD_STILL      8
+#define LAUNCH_STATUS_ARMING          9
+#define LAUNCH_STATUS_READY          10
+#define LAUNCH_STATUS_LAUNCH_CHECK   11
+#define LAUNCH_STATUS_FLIGHT         12

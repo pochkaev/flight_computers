@@ -60,9 +60,18 @@ const uint16_t HEALTH_LOG_OK  = 1 << 5;
 const uint16_t HEALTH_BATT_OK = 1 << 6;
 
 enum RocketLaunchStatus : uint8_t {
-    LAUNCH_STATUS_INHIBIT = 0,
-    LAUNCH_STATUS_WAIT_STILL,
+    LAUNCH_STATUS_BOOT_WAIT = 0,
+    LAUNCH_STATUS_SAFE_REQUIRED,
+    LAUNCH_STATUS_SAFE,
+    LAUNCH_STATUS_PAD_SETTLE,
+    LAUNCH_STATUS_SENSOR_FAULT,
+    LAUNCH_STATUS_LOG_FAULT,
+    LAUNCH_STATUS_BATT_CRIT,
+    LAUNCH_STATUS_HOLD_VERTICAL,
+    LAUNCH_STATUS_HOLD_STILL,
+    LAUNCH_STATUS_ARMING,
     LAUNCH_STATUS_READY,
+    LAUNCH_STATUS_LAUNCH_CHECK,
     LAUNCH_STATUS_FLIGHT
 };
 
@@ -84,6 +93,7 @@ struct __attribute__((packed)) FlightPacketV7 {
     int16_t  roll_cdeg;
     int16_t  pitch_cdeg;
 };
+static_assert(sizeof(FlightPacketV7) == 34, "FlightPacketV7 size mismatch");
 
 struct __attribute__((packed)) NavPacketV7 {
     uint8_t  version;
@@ -101,6 +111,7 @@ struct __attribute__((packed)) NavPacketV7 {
 
     uint32_t last_fix_age_ms;
 };
+static_assert(sizeof(NavPacketV7) == 32, "NavPacketV7 size mismatch");
 
 struct __attribute__((packed)) StatusPacketV8 {
     uint8_t  version;
@@ -116,6 +127,7 @@ struct __attribute__((packed)) StatusPacketV8 {
     int16_t  last_rssi_dbm;
     uint16_t launch_wait_s;
 };
+static_assert(sizeof(StatusPacketV8) == 20, "StatusPacketV8 size mismatch");
 
 struct __attribute__((packed)) IdentityPacketV1 {
     uint8_t  version;
@@ -127,6 +139,7 @@ struct __attribute__((packed)) IdentityPacketV1 {
 
     char     name[16];
 };
+static_assert(sizeof(IdentityPacketV1) == 28, "IdentityPacketV1 size mismatch");
 
 struct __attribute__((packed)) PyroConfigPacketV1 {
     uint8_t  version;

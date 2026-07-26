@@ -6,6 +6,7 @@
 void writeStatusLed(bool on);
 void setLedMode(LedMode mode);
 void updateLedModeFromHealth();
+const char *ledModeName();
 bool startupHardwareOk();
 void updateStatusLed();
 

@@ -12,6 +12,9 @@ extern TinyGPSPlus gps;
 // Init / update
 void radio_init();
 void radio_update();
+void radio_applySettings();
+extern bool groundLoraOk;
+extern uint32_t groundRadioRearmCount;
 
 // Phase
 FlightPhase radio_getPhase();

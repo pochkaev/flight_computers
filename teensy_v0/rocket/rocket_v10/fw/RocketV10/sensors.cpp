@@ -121,7 +121,10 @@ private:
 
     float pressureHpa = pressurePa / 100.0f;
     altM = 44330.0f * (1.0f - powf(pressureHpa / SEA_LEVEL_PRESSURE_HPA, 0.1903f));
-    return isfinite(tempC) && isfinite(pressurePa) && isfinite(altM);
+    return isfinite(tempC) && isfinite(pressurePa) && isfinite(altM) &&
+           tempC >= -60.0f && tempC <= 100.0f &&
+           pressurePa >= 10000.0f && pressurePa <= 120000.0f &&
+           altM >= -1000.0f && altM <= 20000.0f;
   }
 
   bool probe(uint8_t addr) {
@@ -276,7 +279,8 @@ bool isGpsFresh() {
 }
 
 static bool gpsAltitudeUsable() {
-  return gpsHasFix && gpsFixType >= 3 && gps.altitude.isValid() && isGpsFresh();
+  return gpsHasFix && gpsFixType >= 3 && gps.altitude.isValid() &&
+         gps.altitude.age() <= GPS_STALE_MS && isGpsFresh();
 }
 
 static void updateGpsAltitudeReference() {
@@ -365,8 +369,8 @@ static void updateGps() {
     lastGpsDataMs = millis();
   }
 
-  bool locValid = gps.location.isValid();
-  bool altValid = gps.altitude.isValid();
+  bool locValid = gps.location.isValid() && gps.location.age() <= GPS_STALE_MS;
+  bool altValid = gps.altitude.isValid() && gps.altitude.age() <= GPS_STALE_MS;
   gpsHasFix = locValid;
   gpsLatDeg = locValid ? gps.location.lat() : 0.0;
   gpsLonDeg = locValid ? gps.location.lng() : 0.0;
@@ -398,15 +402,33 @@ static void updateImu(float dt) {
   sensors_event_t temp;
   lsm.getEvent(&accel, &mag, &gyro, &temp);
 
-  last_ax = accel.acceleration.x;
-  last_ay = accel.acceleration.y;
-  last_az = accel.acceleration.z;
-  last_gx = gyro.gyro.x * 57.2957795f;
-  last_gy = gyro.gyro.y * 57.2957795f;
-  last_gz = gyro.gyro.z * 57.2957795f;
-  last_mx = mag.magnetic.x;
-  last_my = mag.magnetic.y;
-  last_mz = mag.magnetic.z;
+  const float ax = accel.acceleration.x;
+  const float ay = accel.acceleration.y;
+  const float az = accel.acceleration.z;
+  const float gx = gyro.gyro.x * 57.2957795f;
+  const float gy = gyro.gyro.y * 57.2957795f;
+  const float gz = gyro.gyro.z * 57.2957795f;
+  const float mx = mag.magnetic.x;
+  const float my = mag.magnetic.y;
+  const float mz = mag.magnetic.z;
+  const bool validSample =
+      isfinite(ax) && isfinite(ay) && isfinite(az) &&
+      isfinite(gx) && isfinite(gy) && isfinite(gz) &&
+      isfinite(mx) && isfinite(my) && isfinite(mz) &&
+      fabsf(ax) <= 200.0f && fabsf(ay) <= 200.0f && fabsf(az) <= 200.0f &&
+      fabsf(gx) <= 2500.0f && fabsf(gy) <= 2500.0f && fabsf(gz) <= 2500.0f &&
+      fabsf(mx) <= 2000.0f && fabsf(my) <= 2000.0f && fabsf(mz) <= 2000.0f;
+  if (!validSample) return;
+
+  last_ax = ax;
+  last_ay = ay;
+  last_az = az;
+  last_gx = gx;
+  last_gy = gy;
+  last_gz = gz;
+  last_mx = mx;
+  last_my = my;
+  last_mz = mz;
 
   float ax_g = last_ax / 9.80665f;
   float ay_g = last_ay / 9.80665f;
@@ -529,16 +551,15 @@ static void updateBaroAndState(float dt) {
     if (fabsf(rawVel) > BARO_MAX_RAW_VEL_MPS) {
       velRefAltM = altM;
       velRefMs = nowMs;
-      return;
+    } else {
+      lastAltRaw = altM;
+      velRefAltM = altM;
+      velRefMs = nowMs;
+      velZ = 0.80f * velZ + 0.20f * rawVel;
     }
-    lastAltRaw = altM;
-    velRefAltM = altM;
-    velRefMs = nowMs;
-    velZ = 0.80f * velZ + 0.20f * rawVel;
   }
 
   updateGpsAltitudeReference();
-  updateFlightStateFromBaroSample(nowMs, altM);
 }
 
 void sampleGpsTask() {

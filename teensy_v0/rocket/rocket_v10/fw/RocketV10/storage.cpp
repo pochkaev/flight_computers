@@ -10,6 +10,23 @@
 
 #include "config.h"
 #include "ui.h"
+#include "settings.h"
+#include "timing.h"
+
+static int16_t scaledInt16Saturated(float value, float scale) {
+  const float scaled = value * scale;
+  if (!isfinite(scaled)) return 0;
+  if (scaled >= 32767.0f) return INT16_MAX;
+  if (scaled <= -32768.0f) return INT16_MIN;
+  return (int16_t)lroundf(scaled);
+}
+
+static int16_t angleRadToCdeg(float angleRad) {
+  if (!isfinite(angleRad)) return 0;
+  while (angleRad > PI) angleRad -= 2.0f * PI;
+  while (angleRad < -PI) angleRad += 2.0f * PI;
+  return scaledInt16Saturated(angleRad, 5729.57795f);
+}
 
 #define HAS_LITTLEFS_QPINAND 1
 
@@ -27,6 +44,15 @@ uint32_t nandRecordCount = 0;
 uint8_t nandLogCache[NAND_LOG_CACHE_BYTES];
 uint16_t nandLogCacheBytes = 0;
 uint16_t nandRecordSequence = 0;
+static uint8_t nandFlightRam1[NAND_FLIGHT_RAM1_BYTES];
+DMAMEM static uint8_t nandFlightRam2[NAND_FLIGHT_RAM2_BYTES] __attribute__((aligned(32)));
+uint32_t nandFlightRamBytes = 0;
+uint32_t nandFlightRamDroppedRecords = 0;
+static uint32_t nandFlightRamRecordCount = 0;
+uint32_t nandFlightCriticalRamBytes = 0;
+uint32_t nandFlightCriticalDroppedRecords = 0;
+uint32_t nandFlightNonCriticalDroppedRecords = 0;
+static uint32_t nandFlightCriticalRecordCount = 0;
 uint32_t currentLogIndex = 0;
 uint32_t nandLogOpenMs = 0;
 uint32_t lastLogFlushMs = 0;
@@ -35,6 +61,13 @@ uint32_t lastGpsCharsLogged = 0;
 uint32_t lastGpsPassLogged = 0;
 uint32_t lastGpsFailLogged = 0;
 LittleFS_QPINAND qspiNand;
+
+static const uint8_t NAND_EVENT_QUEUE_LEN = 32;
+static NandEventRecordV4 nandEventQueue[NAND_EVENT_QUEUE_LEN] = {};
+static uint8_t nandEventQueueHead = 0;
+static uint8_t nandEventQueueTail = 0;
+static uint8_t nandEventQueueCount = 0;
+uint32_t nandEventDroppedCount = 0;
 
 extern bool serviceModeActive;
 extern bool serviceModeSuccess;
@@ -60,6 +93,7 @@ extern bool batteryCrit;
 extern bool attitudeAccelCorrectionActive;
 extern bool attitudeMagCorrectionActive;
 extern bool attitudeGyroOnly;
+extern bool armSwitchSafe;
 extern uint8_t gpsFixType;
 extern uint8_t gpsSats;
 extern BatteryPackType batteryPack;
@@ -528,6 +562,7 @@ static void scanNandLogFiles() {
 static bool rewriteNandLogHeader(bool finalized, NandCloseReason closeReason) {
 #if HAS_LITTLEFS_QPINAND
   if (!nandLogFile) return false;
+  const uint32_t timingStartUs = micros();
 
   NandLogHeaderV3 header = {};
   memcpy(header.magic, "RV10NLG", 8);
@@ -547,10 +582,10 @@ static bool rewriteNandLogHeader(bool finalized, NandCloseReason closeReason) {
   header.imu_hz = 1000u / IMU_UPDATE_MS;
   header.baro_hz = 1000u / BARO_UPDATE_MS;
   header.nand_log_hz = 1000u / NAND_LOG_UPDATE_MS;
-  header.sd_log_hz = 1000u / SD_LOG_UPDATE_MS;
-  header.flight_tx_hz_x10 = 10000u / FLIGHT_TX_MS;
-  header.nav_tx_hz_x10 = 10000u / NAV_TX_MS;
-  header.status_tx_hz_x10 = 10000u / STATUS_TX_MS;
+  header.sd_log_hz = SD_RUNTIME_LOG_ENABLE ? (1000u / SD_LOG_UPDATE_MS) : 0u;
+  header.flight_tx_hz_x10 = 10000u / rocketSettings.flightTxMs;
+  header.nav_tx_hz_x10 = 10000u / rocketSettings.navTxMs;
+  header.status_tx_hz_x10 = 10000u / rocketSettings.statusTxMs;
   header.identity_tx_hz_x10 = 10000u / IDENTITY_TX_MS;
   header.recovery_flight_tx_hz_x10 = 10000u / RECOVERY_FLIGHT_TX_MS;
   header.recovery_nav_tx_hz_x10 = 10000u / RECOVERY_NAV_TX_MS;
@@ -564,10 +599,20 @@ static bool rewriteNandLogHeader(bool finalized, NandCloseReason closeReason) {
   header.record_format = NAND_RECORD_FORMAT_V4;
 
   size_t endPos = nandLogFile.size();
-  if (!nandLogFile.seek(0)) return false;
-  if (nandLogFile.write((const uint8_t *)&header, sizeof(header)) != sizeof(header)) return false;
-  if (!nandLogFile.seek(endPos)) return false;
+  if (!nandLogFile.seek(0)) {
+    timingRecordStorage(STORAGE_TIMING_NAND_HEADER, micros() - timingStartUs);
+    return false;
+  }
+  if (nandLogFile.write((const uint8_t *)&header, sizeof(header)) != sizeof(header)) {
+    timingRecordStorage(STORAGE_TIMING_NAND_HEADER, micros() - timingStartUs);
+    return false;
+  }
+  if (!nandLogFile.seek(endPos)) {
+    timingRecordStorage(STORAGE_TIMING_NAND_HEADER, micros() - timingStartUs);
+    return false;
+  }
   nandLogFile.flush();
+  timingRecordStorage(STORAGE_TIMING_NAND_HEADER, micros() - timingStartUs);
   return true;
 #else
   (void)finalized;
@@ -585,13 +630,152 @@ static bool flushNandLogCache() {
   }
 
   const size_t bytesToWrite = nandLogCacheBytes;
+  const uint32_t timingStartUs = micros();
   if (nandLogFile.write((const uint8_t *)nandLogCache, bytesToWrite) != bytesToWrite) {
+    timingRecordStorage(STORAGE_TIMING_NAND_WRITE, micros() - timingStartUs);
     nandLogCacheBytes = 0;
     nandLogOk = false;
     nandLogFile.close();
     return false;
   }
+  timingRecordStorage(STORAGE_TIMING_NAND_WRITE, micros() - timingStartUs);
   nandLogCacheBytes = 0;
+  return true;
+#else
+  return false;
+#endif
+}
+
+static bool isTerminalFlightState() {
+  return flightState == FS_LANDED || flightState == FS_ABORT;
+}
+
+static bool flightRamCaptureActive() {
+  if (isTerminalFlightState()) return false;
+  // Once the log header/file is prepared, PAD recording is a rolling RAM
+  // pre-launch window. Do not let routine SAFE bench logging touch LittleFS.
+  if (flightState == FS_PAD && nandLogFile) return true;
+  return !armSwitchSafe || (flightState != FS_IDLE && flightState != FS_PAD);
+}
+
+static void copyToFlightRam(uint32_t offset, const void *record, uint16_t size) {
+  const uint8_t *source = (const uint8_t *)record;
+  if (offset < NAND_FLIGHT_RAM1_BYTES) {
+    const uint32_t first =
+        min((uint32_t)size, (uint32_t)NAND_FLIGHT_RAM1_BYTES - offset);
+    memcpy(nandFlightRam1 + offset, source, first);
+    offset += first;
+    source += first;
+    size -= (uint16_t)first;
+  }
+  if (size > 0) {
+    memcpy(nandFlightRam2 + (offset - NAND_FLIGHT_RAM1_BYTES), source, size);
+  }
+}
+
+static bool isCriticalFlightRecord(const void *record, uint16_t size) {
+  if (!record || size < 1) return false;
+  const uint8_t type = *((const uint8_t *)record);
+  return type == NAND_RECORD_FULL_STATE_V4 ||
+         type == NAND_RECORD_BARO_V4 ||
+         type == NAND_RECORD_BATT_V4 ||
+         type == NAND_RECORD_EVENT_V4;
+}
+
+static bool appendFlightRamRecord(const void *record, uint16_t size) {
+  const uint32_t totalCapacity =
+      (uint32_t)NAND_FLIGHT_RAM1_BYTES + (uint32_t)NAND_FLIGHT_RAM2_BYTES;
+  const uint32_t primaryCapacity =
+      totalCapacity - (uint32_t)NAND_FLIGHT_CRITICAL_RESERVE_BYTES;
+
+  // A long armed wait must not consume the flight buffer. Keep a recent
+  // bounded pre-launch window; after launch the buffer becomes linear.
+  if (flightState == FS_PAD &&
+      nandFlightRamBytes + size > NAND_PRELAUNCH_RAM_BYTES) {
+    const uint32_t bufferedRecords =
+        nandFlightRamRecordCount + nandFlightCriticalRecordCount;
+    if (nandRecordCount >= bufferedRecords) {
+      nandRecordCount -= bufferedRecords;
+    }
+    nandFlightRamBytes = 0;
+    nandFlightRamRecordCount = 0;
+    nandFlightCriticalRamBytes = 0;
+    nandFlightCriticalRecordCount = 0;
+  }
+
+  if (nandFlightRamBytes + size <= primaryCapacity) {
+    copyToFlightRam(nandFlightRamBytes, record, size);
+    nandFlightRamBytes += size;
+    nandFlightRamRecordCount++;
+    nandRecordCount++;
+    return true;
+  }
+
+  if (isCriticalFlightRecord(record, size) &&
+      nandFlightCriticalRamBytes + size <= NAND_FLIGHT_CRITICAL_RESERVE_BYTES) {
+    copyToFlightRam(primaryCapacity + nandFlightCriticalRamBytes, record, size);
+    nandFlightCriticalRamBytes += size;
+    nandFlightCriticalRecordCount++;
+    nandRecordCount++;
+    return true;
+  }
+
+  nandFlightRamDroppedRecords++;
+  if (isCriticalFlightRecord(record, size)) nandFlightCriticalDroppedRecords++;
+  else nandFlightNonCriticalDroppedRecords++;
+  // Storage saturation must never disable flight logic or close the
+  // pre-opened NAND file. Report the loss through status telemetry/service.
+  return true;
+}
+
+static bool flushFlightRamRange(uint32_t start, uint32_t length) {
+  uint32_t offset = start;
+  const uint32_t end = start + length;
+  while (offset < end) {
+    const uint8_t *source;
+    uint32_t available;
+    if (offset < NAND_FLIGHT_RAM1_BYTES) {
+      source = nandFlightRam1 + offset;
+      available = NAND_FLIGHT_RAM1_BYTES - offset;
+    } else {
+      source = nandFlightRam2 + (offset - NAND_FLIGHT_RAM1_BYTES);
+      available = end - offset;
+    }
+    const uint32_t remaining = end - offset;
+    const size_t chunk = (size_t)min(min(available, remaining),
+                                     (uint32_t)NAND_LOG_CACHE_BYTES);
+    const uint32_t timingStartUs = micros();
+    if (nandLogFile.write(source, chunk) != chunk) {
+      timingRecordStorage(STORAGE_TIMING_NAND_WRITE, micros() - timingStartUs);
+      nandLogOk = false;
+      return false;
+    }
+    timingRecordStorage(STORAGE_TIMING_NAND_WRITE, micros() - timingStartUs);
+    offset += (uint32_t)chunk;
+  }
+  return true;
+}
+
+static bool flushFlightRamToNand() {
+#if HAS_LITTLEFS_QPINAND
+  if (nandFlightRamBytes == 0 && nandFlightCriticalRamBytes == 0) return true;
+  if (!nandLogFile) return false;
+
+  // Preserve record order: pre-arm cache, RAM flight capture, then terminal
+  // records accumulated in the normal cache.
+  if (!flushNandLogCache()) return false;
+
+  const uint32_t totalCapacity =
+      (uint32_t)NAND_FLIGHT_RAM1_BYTES + (uint32_t)NAND_FLIGHT_RAM2_BYTES;
+  const uint32_t primaryCapacity =
+      totalCapacity - (uint32_t)NAND_FLIGHT_CRITICAL_RESERVE_BYTES;
+  if (!flushFlightRamRange(0, nandFlightRamBytes)) return false;
+  if (!flushFlightRamRange(primaryCapacity, nandFlightCriticalRamBytes)) return false;
+
+  nandFlightRamBytes = 0;
+  nandFlightRamRecordCount = 0;
+  nandFlightCriticalRamBytes = 0;
+  nandFlightCriticalRecordCount = 0;
   return true;
 #else
   return false;
@@ -600,6 +784,11 @@ static bool flushNandLogCache() {
 
 static bool appendNandRecord(const void *record, uint16_t size) {
 #if HAS_LITTLEFS_QPINAND
+  if (flightRamCaptureActive()) {
+    return appendFlightRamRecord(record, size);
+  }
+  if ((nandFlightRamBytes > 0 || nandFlightCriticalRamBytes > 0) &&
+      !flushFlightRamToNand()) return false;
   if (size > NAND_LOG_CACHE_BYTES) return false;
   if ((uint32_t)nandLogCacheBytes + size > NAND_LOG_CACHE_BYTES) {
     if (!flushNandLogCache()) return false;
@@ -626,6 +815,7 @@ void finalizeLogFiles(NandCloseReason closeReason) {
 
 #if HAS_LITTLEFS_QPINAND
   if (nandLogFile) {
+    flushFlightRamToNand();
     flushNandLogCache();
     nandLogOk = rewriteNandLogHeader(true, closeReason);
     nandLogFile.close();
@@ -640,7 +830,9 @@ void finalizeLogFiles(NandCloseReason closeReason) {
 
 static void ensureLogOpen() {
   if (logsFinalized) return;
+  if (flightRamCaptureActive()) return;
   bool openedAny = false;
+#if SD_RUNTIME_LOG_ENABLE
   if (sdOk && !sdLogFile) {
     char filename[32];
     snprintf(filename, sizeof(filename), "rocket_flight%04lu.csv", (unsigned long)nextLogIndex);
@@ -655,6 +847,7 @@ static void ensureLogOpen() {
       sdLogOk = false;
     }
   }
+#endif
 
 #if HAS_LITTLEFS_QPINAND
   if (nandOk && !nandLogFile) {
@@ -688,10 +881,10 @@ static void ensureLogOpen() {
       header.imu_hz = 1000u / IMU_UPDATE_MS;
       header.baro_hz = 1000u / BARO_UPDATE_MS;
       header.nand_log_hz = 1000u / NAND_LOG_UPDATE_MS;
-      header.sd_log_hz = 1000u / SD_LOG_UPDATE_MS;
-      header.flight_tx_hz_x10 = 10000u / FLIGHT_TX_MS;
-      header.nav_tx_hz_x10 = 10000u / NAV_TX_MS;
-      header.status_tx_hz_x10 = 10000u / STATUS_TX_MS;
+      header.sd_log_hz = SD_RUNTIME_LOG_ENABLE ? (1000u / SD_LOG_UPDATE_MS) : 0u;
+      header.flight_tx_hz_x10 = 10000u / rocketSettings.flightTxMs;
+      header.nav_tx_hz_x10 = 10000u / rocketSettings.navTxMs;
+      header.status_tx_hz_x10 = 10000u / rocketSettings.statusTxMs;
       header.identity_tx_hz_x10 = 10000u / IDENTITY_TX_MS;
       header.recovery_flight_tx_hz_x10 = 10000u / RECOVERY_FLIGHT_TX_MS;
       header.recovery_nav_tx_hz_x10 = 10000u / RECOVERY_NAV_TX_MS;
@@ -772,7 +965,10 @@ static void logSdCsv() {
              gps.altitude.isValid() ? 1u : 0u,
              gps.date.isValid() ? 1u : 0u,
              gps.time.isValid() ? 1u : 0u);
-    if (!sdLogFile.println(line)) {
+    const uint32_t timingStartUs = micros();
+    const bool writeOk = sdLogFile.println(line);
+    timingRecordStorage(STORAGE_TIMING_SD_WRITE, micros() - timingStartUs);
+    if (!writeOk) {
       sdLogOk = false;
       sdLogFile.close();
     }
@@ -788,29 +984,29 @@ static void fillNandFlightRecord(NandFlightRecordV3 &rec, uint32_t nowMs,
   rec.flight_flags = flightFlags;
   rec.alt_cm = (int32_t)lroundf(filtAlt * 100.0f);
   rec.rel_alt_cm = (int32_t)lroundf(relAlt * 100.0f);
-  rec.vel_cms = (int16_t)lroundf(velZ * 100.0f);
-  rec.temp_centi_c = (int16_t)lroundf(filtTempC * 100.0f);
+  rec.vel_cms = scaledInt16Saturated(velZ, 100.0f);
+  rec.temp_centi_c = scaledInt16Saturated(filtTempC, 100.0f);
   rec.pressure_pa_x10 = (uint32_t)lroundf(filtPressurePa * 10.0f);
-  rec.ax_cms2 = (int16_t)lroundf(last_ax * 100.0f);
-  rec.ay_cms2 = (int16_t)lroundf(last_ay * 100.0f);
-  rec.az_cms2 = (int16_t)lroundf(last_az * 100.0f);
-  rec.gx_cdeg = (int16_t)lroundf(last_gx * 100.0f);
-  rec.gy_cdeg = (int16_t)lroundf(last_gy * 100.0f);
-  rec.gz_cdeg = (int16_t)lroundf(last_gz * 100.0f);
-  rec.roll_cdeg = (int16_t)lroundf(roll * 5729.57795f);
-  rec.pitch_cdeg = (int16_t)lroundf(pitch * 5729.57795f);
+  rec.ax_cms2 = scaledInt16Saturated(last_ax, 100.0f);
+  rec.ay_cms2 = scaledInt16Saturated(last_ay, 100.0f);
+  rec.az_cms2 = scaledInt16Saturated(last_az, 100.0f);
+  rec.gx_cdeg = scaledInt16Saturated(last_gx, 100.0f);
+  rec.gy_cdeg = scaledInt16Saturated(last_gy, 100.0f);
+  rec.gz_cdeg = scaledInt16Saturated(last_gz, 100.0f);
+  rec.roll_cdeg = angleRadToCdeg(roll);
+  rec.pitch_cdeg = angleRadToCdeg(pitch);
   rec.gps_lat_e7 = (int32_t)llround(gpsLatDeg * 1e7);
   rec.gps_lon_e7 = (int32_t)llround(gpsLonDeg * 1e7);
   rec.gps_alt_cm = (int32_t)lroundf(gpsAltM * 100.0f);
   rec.gps_rel_alt_cm = haveGpsBaseAlt ? (int32_t)lroundf(gpsRelAltM * 100.0f) : INT32_MIN;
   rec.baro_gps_delta_cm = isfinite(baroGpsDeltaM) ? (int32_t)lroundf(baroGpsDeltaM * 100.0f) : INT32_MIN;
-  rec.gps_speed_cms = (int16_t)lroundf(gpsSpeedMps * 100.0f);
+  rec.gps_speed_cms = scaledInt16Saturated(gpsSpeedMps, 100.0f);
   rec.batt_mv = (uint16_t)lroundf(rocketBattV * 1000.0f);
   rec.diag_flags = diagFlags;
-  rec.mx_centiuT = (int16_t)lroundf(last_mx * 100.0f);
-  rec.my_centiuT = (int16_t)lroundf(last_my * 100.0f);
-  rec.mz_centiuT = (int16_t)lroundf(last_mz * 100.0f);
-  rec.yaw_cdeg = (int16_t)lroundf(yaw * 5729.57795f);
+  rec.mx_centiuT = scaledInt16Saturated(last_mx, 100.0f);
+  rec.my_centiuT = scaledInt16Saturated(last_my, 100.0f);
+  rec.mz_centiuT = scaledInt16Saturated(last_mz, 100.0f);
+  rec.yaw_cdeg = angleRadToCdeg(yaw);
   rec.state = (uint8_t)flightState;
   rec.gps_fix_type = gpsFixType;
   rec.gps_sats = gpsSats;
@@ -820,7 +1016,7 @@ static void fillNandFlightRecord(NandFlightRecordV3 &rec, uint32_t nowMs,
 static void logNandBinary() {
 #if HAS_LITTLEFS_QPINAND
   ensureLogOpen();
-  if (nandLogFile) {
+  if (nandLogFile || flightRamCaptureActive()) {
     NandFullStateRecordV4 rec = {};
     rec.type = NAND_RECORD_FULL_STATE_V4;
     rec.size = sizeof(rec);
@@ -839,21 +1035,21 @@ void logNandImuBinary(uint32_t nowMs) {
 #if HAS_LITTLEFS_QPINAND
   if (flightState == FS_LANDED || flightState == FS_ABORT) return;
   ensureLogOpen();
-  if (nandLogFile) {
-    NandImuRecordV4 rec = {};
-    rec.type = NAND_RECORD_IMU_V4;
+  if (nandLogFile || flightRamCaptureActive()) {
+    NandImuWideRecordV4 rec = {};
+    rec.type = NAND_RECORD_IMU_WIDE_V4;
     rec.size = sizeof(rec);
     rec.sequence = nandRecordSequence++;
     rec.ms = nowMs;
-    rec.ax_cms2 = (int16_t)lroundf(last_ax * 100.0f);
-    rec.ay_cms2 = (int16_t)lroundf(last_ay * 100.0f);
-    rec.az_cms2 = (int16_t)lroundf(last_az * 100.0f);
-    rec.gx_cdeg = (int16_t)lroundf(last_gx * 100.0f);
-    rec.gy_cdeg = (int16_t)lroundf(last_gy * 100.0f);
-    rec.gz_cdeg = (int16_t)lroundf(last_gz * 100.0f);
-    rec.roll_cdeg = (int16_t)lroundf(roll * 5729.57795f);
-    rec.pitch_cdeg = (int16_t)lroundf(pitch * 5729.57795f);
-    rec.yaw_cdeg = (int16_t)lroundf(yaw * 5729.57795f);
+    rec.ax_cms2 = scaledInt16Saturated(last_ax, 100.0f);
+    rec.ay_cms2 = scaledInt16Saturated(last_ay, 100.0f);
+    rec.az_cms2 = scaledInt16Saturated(last_az, 100.0f);
+    rec.gx_mdeg = (int32_t)lroundf(last_gx * 1000.0f);
+    rec.gy_mdeg = (int32_t)lroundf(last_gy * 1000.0f);
+    rec.gz_mdeg = (int32_t)lroundf(last_gz * 1000.0f);
+    rec.roll_cdeg = angleRadToCdeg(roll);
+    rec.pitch_cdeg = angleRadToCdeg(pitch);
+    rec.yaw_cdeg = angleRadToCdeg(yaw);
     rec.state = (uint8_t)flightState;
     rec.flags = 0;
     if (!appendNandRecord(&rec, sizeof(rec))) {
@@ -868,7 +1064,7 @@ void logNandImuBinary(uint32_t nowMs) {
 void logNandBaroBinary(uint32_t nowMs) {
 #if HAS_LITTLEFS_QPINAND
   ensureLogOpen();
-  if (nandLogFile) {
+  if (nandLogFile || flightRamCaptureActive()) {
     NandBaroRecordV4 rec = {};
     rec.type = NAND_RECORD_BARO_V4;
     rec.size = sizeof(rec);
@@ -876,8 +1072,8 @@ void logNandBaroBinary(uint32_t nowMs) {
     rec.ms = nowMs;
     rec.alt_cm = (int32_t)lroundf(filtAlt * 100.0f);
     rec.rel_alt_cm = (int32_t)lroundf(currentBaroRelAltM() * 100.0f);
-    rec.vel_cms = (int16_t)lroundf(velZ * 100.0f);
-    rec.temp_centi_c = (int16_t)lroundf(filtTempC * 100.0f);
+    rec.vel_cms = scaledInt16Saturated(velZ, 100.0f);
+    rec.temp_centi_c = scaledInt16Saturated(filtTempC, 100.0f);
     rec.pressure_pa_x10 = (uint32_t)lroundf(filtPressurePa * 10.0f);
     rec.diag_flags = diagFlags;
     rec.state = (uint8_t)flightState;
@@ -895,9 +1091,9 @@ void logNandBaroBinary(uint32_t nowMs) {
 
 void logNandGpsBinary(uint32_t nowMs) {
 #if HAS_LITTLEFS_QPINAND
-  if (lastGpsDataMs == 0 || (uint32_t)(nowMs - lastGpsLoggedMs) < NAV_TX_MS) return;
+  if (lastGpsDataMs == 0 || (uint32_t)(nowMs - lastGpsLoggedMs) < rocketSettings.navTxMs) return;
   ensureLogOpen();
-  if (nandLogFile) {
+  if (nandLogFile || flightRamCaptureActive()) {
     const uint32_t charsNow = gps.charsProcessed();
     const uint32_t passNow = gps.passedChecksum();
     const uint32_t failNow = gps.failedChecksum();
@@ -911,7 +1107,7 @@ void logNandGpsBinary(uint32_t nowMs) {
     rec.alt_cm = (int32_t)lroundf(gpsAltM * 100.0f);
     rec.rel_alt_cm = haveGpsBaseAlt ? (int32_t)lroundf(gpsRelAltM * 100.0f) : INT32_MIN;
     rec.baro_gps_delta_cm = isfinite(baroGpsDeltaM) ? (int32_t)lroundf(baroGpsDeltaM * 100.0f) : INT32_MIN;
-    rec.speed_cms = (int16_t)lroundf(gpsSpeedMps * 100.0f);
+    rec.speed_cms = scaledInt16Saturated(gpsSpeedMps, 100.0f);
     const uint32_t fixAgeMs = gpsHasFix ? 0u : (lastGpsFixMs ? (nowMs - lastGpsFixMs) : 0xFFFFFFFFu);
     rec.fix_age_ms_x10 = (uint16_t)min(fixAgeMs / 10u, 65535u);
     rec.chars_delta = (uint16_t)min(charsNow - lastGpsCharsLogged, 65535u);
@@ -944,7 +1140,7 @@ void logNandGpsBinary(uint32_t nowMs) {
 void logNandBatteryBinary(uint32_t nowMs) {
 #if HAS_LITTLEFS_QPINAND
   ensureLogOpen();
-  if (nandLogFile) {
+  if (nandLogFile || flightRamCaptureActive()) {
     NandBatteryRecordV4 rec = {};
     rec.type = NAND_RECORD_BATT_V4;
     rec.size = sizeof(rec);
@@ -971,27 +1167,28 @@ void logNandBatteryBinary(uint32_t nowMs) {
 void logNandEventBinary(uint32_t nowMs, uint8_t eventType, FlightState fromState,
                         FlightState toState, NandCloseReason closeReason) {
 #if HAS_LITTLEFS_QPINAND
-  ensureLogOpen();
-  if (nandLogFile) {
-    NandEventRecordV4 rec = {};
-    rec.type = NAND_RECORD_EVENT_V4;
-    rec.size = sizeof(rec);
-    rec.sequence = nandRecordSequence++;
-    rec.ms = nowMs;
-    rec.event_type = eventType;
-    rec.from_state = (uint8_t)fromState;
-    rec.to_state = (uint8_t)toState;
-    rec.close_reason = (uint8_t)closeReason;
-    rec.flight_flags = flightFlags;
-    rec.diag_flags = diagFlags;
-    rec.rel_alt_cm = (int32_t)lroundf(currentBaroRelAltM() * 100.0f);
-    rec.vel_cms = (int16_t)lroundf(velZ * 100.0f);
-    rec.health_flags = buildHealthFlags();
-    if (!appendNandRecord(&rec, sizeof(rec))) {
-      nandLogOk = false;
-      if (nandLogFile) nandLogFile.close();
-    }
+  // Flight and pyro code enqueue only. Filesystem work is deferred until
+  // storageTask(), after the flight kernel and output shutoff have run.
+  if (nandEventQueueCount >= NAND_EVENT_QUEUE_LEN) {
+    nandEventDroppedCount++;
+    return;
   }
+  NandEventRecordV4 &rec = nandEventQueue[nandEventQueueTail];
+  rec = {};
+  rec.type = NAND_RECORD_EVENT_V4;
+  rec.size = sizeof(rec);
+  rec.ms = nowMs;
+  rec.event_type = eventType;
+  rec.from_state = (uint8_t)fromState;
+  rec.to_state = (uint8_t)toState;
+  rec.close_reason = (uint8_t)closeReason;
+  rec.flight_flags = flightFlags;
+  rec.diag_flags = diagFlags;
+  rec.rel_alt_cm = (int32_t)lroundf(currentBaroRelAltM() * 100.0f);
+  rec.vel_cms = scaledInt16Saturated(velZ, 100.0f);
+  rec.health_flags = buildHealthFlags();
+  nandEventQueueTail = (uint8_t)((nandEventQueueTail + 1u) % NAND_EVENT_QUEUE_LEN);
+  nandEventQueueCount++;
 #else
   (void)nowMs;
   (void)eventType;
@@ -1000,6 +1197,24 @@ void logNandEventBinary(uint32_t nowMs, uint8_t eventType, FlightState fromState
   (void)closeReason;
 #endif
   logOk = sdLogOk || nandLogOk || logsFinalized;
+}
+
+static void drainNandEventQueue() {
+#if HAS_LITTLEFS_QPINAND
+  if (nandEventQueueCount == 0) return;
+  ensureLogOpen();
+  while ((nandLogFile || flightRamCaptureActive()) && nandEventQueueCount > 0) {
+    NandEventRecordV4 &rec = nandEventQueue[nandEventQueueHead];
+    rec.sequence = nandRecordSequence++;
+    if (!appendNandRecord(&rec, sizeof(rec))) {
+      nandLogOk = false;
+      if (nandLogFile) nandLogFile.close();
+      return;
+    }
+    nandEventQueueHead = (uint8_t)((nandEventQueueHead + 1u) % NAND_EVENT_QUEUE_LEN);
+    nandEventQueueCount--;
+  }
+#endif
 }
 
 static const char *eventTypeName(uint8_t eventType) {
@@ -1036,7 +1251,7 @@ static const char *eventTypeName(uint8_t eventType) {
 void logNandTelemetryBinary(uint32_t nowMs, uint8_t packetType, uint32_t packetSeq) {
 #if HAS_LITTLEFS_QPINAND
   ensureLogOpen();
-  if (nandLogFile) {
+  if (nandLogFile || flightRamCaptureActive()) {
     NandTelemetryRecordV4 rec = {};
     rec.type = NAND_RECORD_TELEM_V4;
     rec.size = sizeof(rec);
@@ -1069,7 +1284,7 @@ void logNandAttitudeBinary(uint32_t nowMs) {
 #if HAS_LITTLEFS_QPINAND
   if (!haveImuEstimate || flightState == FS_LANDED || flightState == FS_ABORT) return;
   ensureLogOpen();
-  if (nandLogFile) {
+  if (nandLogFile || flightRamCaptureActive()) {
     NandAttitudeRecordV4 rec = {};
     rec.type = NAND_RECORD_ATTITUDE_V4;
     rec.size = sizeof(rec);
@@ -1079,9 +1294,9 @@ void logNandAttitudeBinary(uint32_t nowMs) {
     rec.qx_i16 = quantizeUnitI16(attitudeQx);
     rec.qy_i16 = quantizeUnitI16(attitudeQy);
     rec.qz_i16 = quantizeUnitI16(attitudeQz);
-    rec.roll_cdeg = (int16_t)lroundf(roll * 5729.57795f);
-    rec.pitch_cdeg = (int16_t)lroundf(pitch * 5729.57795f);
-    rec.yaw_cdeg = (int16_t)lroundf(yaw * 5729.57795f);
+    rec.roll_cdeg = angleRadToCdeg(roll);
+    rec.pitch_cdeg = angleRadToCdeg(pitch);
+    rec.yaw_cdeg = angleRadToCdeg(yaw);
     rec.diag_flags = diagFlags;
     rec.state = (uint8_t)flightState;
     rec.flags = 0;
@@ -1101,14 +1316,30 @@ void logNandAttitudeBinary(uint32_t nowMs) {
 
 static void flushLogsIfDue() {
   const uint32_t nowMs = millis();
+  // No explicit filesystem flush or header seek is allowed after physical ARM
+  // or during flight. Sequential cache writes may still occur and are timed.
+  const bool flightCriticalMode =
+      !armSwitchSafe || (flightState != FS_IDLE && flightState != FS_PAD);
+  if (flightCriticalMode || flightRamCaptureActive()) return;
+
   if ((nowMs - lastLogFlushMs) >= LOG_FLUSH_MS) {
     lastLogFlushMs = nowMs;
-    if (sdLogFile) sdLogFile.flush();
+#if SD_RUNTIME_LOG_ENABLE
+    if (sdLogFile) {
+      const uint32_t timingStartUs = micros();
+      sdLogFile.flush();
+      timingRecordStorage(STORAGE_TIMING_SD_FLUSH, micros() - timingStartUs);
+    }
+#endif
 #if HAS_LITTLEFS_QPINAND
     if (nandLogFile) {
       flushNandLogCache();
+#if NAND_PERIODIC_HEADER_UPDATE
       rewriteNandLogHeader(false, NAND_CLOSE_NONE);
+#endif
+      const uint32_t timingStartUs = micros();
       nandLogFile.flush();
+      timingRecordStorage(STORAGE_TIMING_NAND_FLUSH, micros() - timingStartUs);
     }
 #endif
   }
@@ -1481,6 +1712,39 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
                  rec.gx_cdeg / 100.0f,
                  rec.gy_cdeg / 100.0f,
                  rec.gz_cdeg / 100.0f,
+                 rec.roll_cdeg / 100.0f,
+                 rec.pitch_cdeg / 100.0f,
+                 rec.yaw_cdeg / 100.0f);
+        if (!imuDst.println(line)) {
+          if (dst) dst.close();
+          imuDst.close();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      if (exportImu) wroteImu = true;
+      imuRows++;
+    } else if (type == NAND_RECORD_IMU_WIDE_V4 && size == sizeof(NandImuWideRecordV4)) {
+      NandImuWideRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: wide imu record read failed");
+        CLOSE_DETAIL_EXPORT_FILES();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (imuDst) {
+        char line[192];
+        snprintf(line, sizeof(line),
+                 "%lu,%u,%u,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 (unsigned int)rec.state,
+                 rec.ax_cms2 / 100.0f,
+                 rec.ay_cms2 / 100.0f,
+                 rec.az_cms2 / 100.0f,
+                 rec.gx_mdeg / 1000.0f,
+                 rec.gy_mdeg / 1000.0f,
+                 rec.gz_mdeg / 1000.0f,
                  rec.roll_cdeg / 100.0f,
                  rec.pitch_cdeg / 100.0f,
                  rec.yaw_cdeg / 100.0f);
@@ -1971,6 +2235,491 @@ static bool eraseAllNandLogs(uint32_t &removedCount) {
   return allOk;
 }
 
+static bool hasSuffix(const char *text, const char *suffix) {
+  if (!text || !suffix) return false;
+  const size_t textLen = strlen(text);
+  const size_t suffixLen = strlen(suffix);
+  return textLen >= suffixLen &&
+         strcmp(text + textLen - suffixLen, suffix) == 0;
+}
+
+static bool isRocketSdLogName(const char *name) {
+  if (!name || !hasSuffix(name, ".csv")) return false;
+  if (strstr(name, "rocket_nand_") != nullptr) return true;
+
+  int idx = extractPrefixedIndex(name, "rocket_flight");
+  if (idx < 0) idx = extractPrefixedIndex(name, "flight");
+  return idx > 0;
+}
+
+static bool eraseAllSdLogs(uint32_t &removedCount) {
+  removedCount = 0;
+  File root = SD.open("/");
+  if (!root) return false;
+
+  bool allOk = true;
+  while (true) {
+    File f = root.openNextFile();
+    if (!f) break;
+    if (!f.isDirectory() && isRocketSdLogName(f.name())) {
+      char path[96];
+      strncpy(path, f.name(), sizeof(path) - 1);
+      path[sizeof(path) - 1] = '\0';
+      f.close();
+      if (SD.remove(path)) {
+        removedCount++;
+      } else {
+        allOk = false;
+      }
+      continue;
+    }
+    f.close();
+  }
+  root.close();
+  return allOk;
+}
+
+bool storageEraseLogs(bool eraseNand, bool eraseSd,
+                      uint32_t &nandRemoved, uint32_t &sdRemoved) {
+  nandRemoved = 0;
+  sdRemoved = 0;
+  if (!eraseNand && !eraseSd) return false;
+  if ((eraseNand && !nandOk) || (eraseSd && !sdOk)) return false;
+
+  // Close both files before deleting either backend. Retained media will
+  // restart on the next loop with an index consistent across SD and NAND.
+  finalizeLogFiles(NAND_CLOSE_SERVICE);
+
+  bool ok = true;
+  if (eraseNand) ok = eraseAllNandLogs(nandRemoved) && ok;
+  if (eraseSd) ok = eraseAllSdLogs(sdRemoved) && ok;
+
+  nandLogCacheBytes = 0;
+  nandRecordCount = 0;
+  nandRecordSequence = 0;
+  nandLogPath[0] = '\0';
+  currentLogIndex = 0;
+  nextLogIndex = 1;
+  lastLogFlushMs = millis();
+  lastGpsLoggedMs = 0;
+  nandEventQueueHead = 0;
+  nandEventQueueTail = 0;
+  nandEventQueueCount = 0;
+  nandEventDroppedCount = 0;
+  nandFlightRamBytes = 0;
+  nandFlightRamRecordCount = 0;
+  nandFlightCriticalRamBytes = 0;
+  nandFlightCriticalRecordCount = 0;
+  nandFlightRamDroppedRecords = 0;
+  nandFlightCriticalDroppedRecords = 0;
+  nandFlightNonCriticalDroppedRecords = 0;
+  logsFinalized = false;
+  sdLogOk = false;
+  nandLogOk = false;
+  logOk = false;
+
+  if (sdOk) scanSdLogFiles();
+#if HAS_LITTLEFS_QPINAND
+  if (nandOk) scanNandLogFiles();
+#endif
+  return ok;
+}
+
+static void resumeLoggingAfterSerialService() {
+  nandLogCacheBytes = 0;
+  nandFlightRamBytes = 0;
+  nandFlightRamRecordCount = 0;
+  nandFlightCriticalRamBytes = 0;
+  nandFlightCriticalRecordCount = 0;
+  nandRecordCount = 0;
+  nandRecordSequence = 0;
+  nandLogPath[0] = '\0';
+  currentLogIndex = 0;
+  lastLogFlushMs = millis();
+  lastGpsLoggedMs = 0;
+  logsFinalized = false;
+  sdLogOk = false;
+  nandLogOk = false;
+  logOk = false;
+  if (sdOk) scanSdLogFiles();
+#if HAS_LITTLEFS_QPINAND
+  if (nandOk) scanNandLogFiles();
+#endif
+}
+
+void storagePrintStatus(Stream &out) {
+  out.println("STORAGE STATUS");
+  out.print("SD_OK "); out.println(sdOk ? 1 : 0);
+  out.print("SD_RUNTIME_LOG "); out.println(SD_RUNTIME_LOG_ENABLE ? 1 : 0);
+  out.print("NAND_OK "); out.println(nandOk ? 1 : 0);
+  out.print("NAND_TOTAL_BYTES ");
+  out.println(nandOk ? (uint32_t)qspiNand.totalSize() : 0u);
+  out.print("NAND_USED_BYTES ");
+  out.println(nandOk ? (uint32_t)qspiNand.usedSize() : 0u);
+  out.print("NAND_FREE_BYTES ");
+  out.println(nandOk ? (uint32_t)nandFreeBytes() : 0u);
+  out.print("LOG_OK "); out.println(logOk ? 1 : 0);
+  out.print("NAND_LOG_OK "); out.println(nandLogOk ? 1 : 0);
+  out.print("LOG_FINALIZED "); out.println(logsFinalized ? 1 : 0);
+  out.print("CURRENT_LOG_INDEX "); out.println(currentLogIndex);
+  out.print("NEXT_LOG_INDEX "); out.println(nextLogIndex);
+  out.print("NAND_CACHE_BYTES "); out.println(nandLogCacheBytes);
+  out.print("FLIGHT_RAM_BYTES "); out.println(nandFlightRamBytes);
+  out.print("FLIGHT_RAM_PRIMARY_CAPACITY ");
+  out.println((uint32_t)NAND_FLIGHT_RAM1_BYTES +
+              (uint32_t)NAND_FLIGHT_RAM2_BYTES -
+              (uint32_t)NAND_FLIGHT_CRITICAL_RESERVE_BYTES);
+  out.print("FLIGHT_RAM_CRITICAL_BYTES "); out.println(nandFlightCriticalRamBytes);
+  out.print("FLIGHT_RAM_CRITICAL_CAPACITY ");
+  out.println((uint32_t)NAND_FLIGHT_CRITICAL_RESERVE_BYTES);
+  out.print("FLIGHT_RAM_DROPPED "); out.println(nandFlightRamDroppedRecords);
+  out.print("FLIGHT_RAM_DROPPED_CRITICAL ");
+  out.println(nandFlightCriticalDroppedRecords);
+  out.print("FLIGHT_RAM_DROPPED_NONCRITICAL ");
+  out.println(nandFlightNonCriticalDroppedRecords);
+  out.print("NAND_RECORD_COUNT "); out.println(nandRecordCount);
+  out.print("EVENT_QUEUE_DEPTH "); out.println(nandEventQueueCount);
+  out.print("EVENT_DROPPED "); out.println(nandEventDroppedCount);
+  out.println("STORAGE STATUS END");
+}
+
+void storageListNand(Stream &out) {
+  out.println("NAND LIST BEGIN");
+#if HAS_LITTLEFS_QPINAND
+  if (!nandOk) {
+    out.println("ERR NAND unavailable");
+    out.println("NAND LIST END COUNT 0");
+    return;
+  }
+  File root = qspiNand.open("/");
+  if (!root) {
+    out.println("ERR NAND root");
+    out.println("NAND LIST END COUNT 0");
+    return;
+  }
+  uint32_t count = 0;
+  while (true) {
+    File f = root.openNextFile();
+    if (!f) break;
+    if (!f.isDirectory()) {
+      const char *name = f.name();
+      int idx = extractPrefixedIndex(name, "rocket_flt");
+      if (idx < 0) idx = extractPrefixedIndex(name, "flt");
+      if (idx > 0 && strstr(name, ".bin")) {
+        NandLogHeaderV3 header = {};
+        const bool headerOk =
+            f.seek(0) &&
+            f.read((uint8_t *)&header, sizeof(header)) == (int)sizeof(header) &&
+            memcmp(header.magic, "RV10NLG", 8) == 0;
+        out.print("NAND_LOG INDEX "); out.print(idx);
+        out.print(" NAME "); out.print(name);
+        out.print(" BYTES "); out.print((uint32_t)f.size());
+        out.print(" HEADER_OK "); out.print(headerOk ? 1 : 0);
+        if (headerOk) {
+          out.print(" RECORDS "); out.print(header.record_count);
+          out.print(" FINALIZED ");
+          out.print((header.flags & NAND_LOG_FLAG_FINALIZED) ? 1 : 0);
+          out.print(" STATE "); out.print(header.final_state);
+          out.print(" FW "); out.print(header.firmware_version);
+        }
+        out.println();
+        count++;
+      }
+    }
+    f.close();
+  }
+  root.close();
+  out.print("NAND LIST END COUNT "); out.println(count);
+#else
+  out.println("ERR NAND unsupported");
+  out.println("NAND LIST END COUNT 0");
+#endif
+}
+
+void storageListSd(Stream &out) {
+  out.println("SD LIST BEGIN");
+  if (!sdOk) {
+    out.println("ERR SD unavailable");
+    out.println("SD LIST END COUNT 0");
+    return;
+  }
+  File root = SD.open("/");
+  if (!root) {
+    out.println("ERR SD root");
+    out.println("SD LIST END COUNT 0");
+    return;
+  }
+  uint32_t count = 0;
+  while (true) {
+    File f = root.openNextFile();
+    if (!f) break;
+    out.print(f.isDirectory() ? "SD_DIR NAME " : "SD_FILE NAME ");
+    out.print(f.name());
+    if (!f.isDirectory()) {
+      out.print(" BYTES ");
+      out.print((uint32_t)f.size());
+    }
+    out.println();
+    count++;
+    f.close();
+  }
+  root.close();
+  out.print("SD LIST END COUNT "); out.println(count);
+}
+
+struct __attribute__((packed)) SerialTransferFrame {
+  char magic[4];
+  uint8_t version;
+  uint8_t backend;
+  uint16_t flags;
+  uint32_t sequence;
+  uint32_t offset;
+  uint16_t length;
+  uint16_t reserved;
+  uint32_t crc32;
+};
+static_assert(sizeof(SerialTransferFrame) == 24, "SerialTransferFrame size mismatch");
+
+static uint32_t updateCrc32(uint32_t crc, const uint8_t *data, size_t length) {
+  while (length-- > 0) {
+    crc ^= *data++;
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(crc & 1u));
+    }
+  }
+  return crc;
+}
+
+static bool safeStorageName(const char *name) {
+  if (!name || !*name || strlen(name) > 80) return false;
+  if (strstr(name, "..") || strchr(name, '/') || strchr(name, '\\')) return false;
+  for (const char *p = name; *p; ++p) {
+    const char c = *p;
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+          (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool nandPathForIndex(uint32_t index, char *path, size_t pathSize) {
+  if (!nandOk || index == 0 || !path || pathSize < 20) return false;
+  snprintf(path, pathSize, "/rocket_flt%04lu.bin", (unsigned long)index);
+  File f = qspiNand.open(path, FILE_READ);
+  if (f) {
+    f.close();
+    return true;
+  }
+  snprintf(path, pathSize, "/flt%04lu.bin", (unsigned long)index);
+  f = qspiNand.open(path, FILE_READ);
+  if (!f) return false;
+  f.close();
+  return true;
+}
+
+static bool streamFileRange(File &file, const char *backendName,
+                            const char *objectName, uint8_t backend,
+                            uint32_t offset, uint32_t requestedLength,
+                            Stream &out) {
+  const uint32_t fileSize = (uint32_t)file.size();
+  if (offset > fileSize) {
+    out.println("ERR READ offset");
+    return false;
+  }
+  uint32_t transferLength = fileSize - offset;
+  if (requestedLength != 0 && requestedLength < transferLength) {
+    transferLength = requestedLength;
+  }
+  if (!file.seek(offset)) {
+    out.println("ERR READ seek");
+    return false;
+  }
+
+  out.print("XFER BEGIN BACKEND "); out.print(backendName);
+  out.print(" NAME "); out.print(objectName);
+  out.print(" SIZE "); out.print(fileSize);
+  out.print(" OFFSET "); out.print(offset);
+  out.print(" LENGTH "); out.print(transferLength);
+  out.println(" CHUNK 1024");
+
+  uint8_t payload[1024];
+  uint32_t sent = 0;
+  uint32_t sequence = 0;
+  uint32_t runningCrc = 0xFFFFFFFFu;
+  while (sent < transferLength) {
+    if (digitalRead(ARM_SWITCH_PIN) != ARM_SWITCH_SAFE_LEVEL ||
+        (flightState != FS_IDLE && flightState != FS_PAD)) {
+      out.println("\nXFER ERROR LOCKED");
+      return false;
+    }
+    const uint16_t wanted =
+        (uint16_t)min((uint32_t)sizeof(payload), transferLength - sent);
+    const int got = file.read(payload, wanted);
+    if (got <= 0) {
+      out.println("\nXFER ERROR READ");
+      return false;
+    }
+    const uint16_t payloadLength = (uint16_t)got;
+    const uint32_t payloadCrc =
+        updateCrc32(0xFFFFFFFFu, payload, payloadLength) ^ 0xFFFFFFFFu;
+    runningCrc = updateCrc32(runningCrc, payload, payloadLength);
+
+    SerialTransferFrame frame = {};
+    memcpy(frame.magic, "RVXF", 4);
+    frame.version = 1;
+    frame.backend = backend;
+    frame.flags = (sent + payloadLength == transferLength) ? 1u : 0u;
+    frame.sequence = sequence++;
+    frame.offset = offset + sent;
+    frame.length = payloadLength;
+    frame.crc32 = payloadCrc;
+    out.write((const uint8_t *)&frame, sizeof(frame));
+    out.write(payload, payloadLength);
+    sent += payloadLength;
+  }
+
+  out.print("\nXFER END BYTES "); out.print(sent);
+  out.print(" CRC32 ");
+  char crcText[9];
+  snprintf(crcText, sizeof(crcText), "%08lX",
+           (unsigned long)(runningCrc ^ 0xFFFFFFFFu));
+  out.println(crcText);
+  return true;
+}
+
+bool storageInfoNand(uint32_t index, Stream &out) {
+  char path[32];
+  if (!nandPathForIndex(index, path, sizeof(path))) {
+    out.println("ERR NAND INFO not found");
+    return false;
+  }
+  File f = qspiNand.open(path, FILE_READ);
+  if (!f) {
+    out.println("ERR NAND INFO open");
+    return false;
+  }
+  NandLogHeaderV3 header = {};
+  const bool headerOk =
+      f.read((uint8_t *)&header, sizeof(header)) == (int)sizeof(header) &&
+      memcmp(header.magic, "RV10NLG", 8) == 0;
+  out.print("NAND INFO INDEX "); out.print(index);
+  out.print(" NAME "); out.print(path[0] == '/' ? path + 1 : path);
+  out.print(" BYTES "); out.print((uint32_t)f.size());
+  out.print(" HEADER_OK "); out.print(headerOk ? 1 : 0);
+  if (headerOk) {
+    out.print(" RECORDS "); out.print(header.record_count);
+    out.print(" FINALIZED ");
+    out.print((header.flags & NAND_LOG_FLAG_FINALIZED) ? 1 : 0);
+    out.print(" STATE "); out.print(header.final_state);
+    out.print(" FW "); out.print(header.firmware_version);
+  }
+  out.println();
+  f.close();
+  return true;
+}
+
+bool storageInfoSd(const char *name, Stream &out) {
+  if (!sdOk || !safeStorageName(name)) {
+    out.println("ERR SD INFO name");
+    return false;
+  }
+  File f = SD.open(name, FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    out.println("ERR SD INFO not found");
+    return false;
+  }
+  out.print("SD INFO NAME "); out.print(name);
+  out.print(" BYTES "); out.println((uint32_t)f.size());
+  f.close();
+  return true;
+}
+
+bool storageReadNand(uint32_t index, uint32_t offset, uint32_t length, Stream &out) {
+  if (nandLogFile && index == currentLogIndex) {
+    out.println("ERR NAND READ active log");
+    return false;
+  }
+  char path[32];
+  if (!nandPathForIndex(index, path, sizeof(path))) {
+    out.println("ERR NAND READ not found");
+    return false;
+  }
+  File f = qspiNand.open(path, FILE_READ);
+  if (!f) {
+    out.println("ERR NAND READ open");
+    return false;
+  }
+  const bool ok = streamFileRange(
+      f, "NAND", path[0] == '/' ? path + 1 : path, 1, offset, length, out);
+  f.close();
+  return ok;
+}
+
+bool storageReadSd(const char *name, uint32_t offset, uint32_t length, Stream &out) {
+  if (!sdOk || !safeStorageName(name)) {
+    out.println("ERR SD READ name");
+    return false;
+  }
+  File f = SD.open(name, FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    out.println("ERR SD READ not found");
+    return false;
+  }
+  const bool ok = streamFileRange(f, "SD", name, 2, offset, length, out);
+  f.close();
+  return ok;
+}
+
+bool storageMountSd() {
+  if (sdLogFile) {
+    sdLogFile.close();
+  }
+  sdLogOk = false;
+  sdOk = SD.begin(BUILTIN_SDCARD);
+  if (sdOk) {
+    sdOk = verifySdFilesystem();
+  }
+  if (sdOk) {
+    scanSdLogFiles();
+  }
+  return sdOk;
+}
+
+bool storageExportNandToSd(int32_t index, bool includeDetail,
+                           uint32_t &exportedCount, uint32_t &skippedCount,
+                           uint32_t &failedCount) {
+  exportedCount = 0;
+  skippedCount = 0;
+  failedCount = 0;
+  if (!nandOk || !sdOk) return false;
+
+  finalizeLogFiles(NAND_CLOSE_SERVICE);
+  const uint32_t operationId = millis();
+  bool ok = true;
+  if (index < 0) {
+    ok = exportAllNandLogsToSd(operationId, false, includeDetail,
+                               exportedCount, skippedCount, failedCount);
+  } else {
+    char path[32];
+    snprintf(path, sizeof(path), "/rocket_flt%04ld.bin", (long)index);
+    NandExportResult result =
+        exportOneNandLogToSd(path, operationId, includeDetail);
+    if (result == NAND_EXPORT_SKIPPED) {
+      snprintf(path, sizeof(path), "/flt%04ld.bin", (long)index);
+      result = exportOneNandLogToSd(path, operationId, includeDetail);
+    }
+    if (result == NAND_EXPORT_EXPORTED) exportedCount = 1;
+    else if (result == NAND_EXPORT_SKIPPED) skippedCount = 1;
+    else failedCount = 1;
+    ok = result == NAND_EXPORT_EXPORTED;
+  }
+  resumeLoggingAfterSerialService();
+  return ok && failedCount == 0;
+}
+
 void processServiceModeIfRequested() {
   ServiceRequest req = loadServiceRequest();
   if (!req.valid) return;
@@ -2087,13 +2836,11 @@ void setupStorage() {
   nandOk = false;
 #endif
 
-  sdOk = SD.begin(BUILTIN_SDCARD);
+  storageMountSd();
   if (sdOk) {
-    sdOk = verifySdFilesystem();
-  }
-  if (sdOk) {
-    scanSdLogFiles();
+#if SD_CONFIG_LOAD_ENABLE
     loadRocketConfig();
+#endif
   }
   logOk = false;
   sdLogOk = false;
@@ -2102,6 +2849,7 @@ void setupStorage() {
 }
 
 void storageTask() {
+  const uint32_t timingStartUs = micros();
   static uint32_t lastSdLogMs = 0;
   static uint32_t lastNandLogMs = 0;
   const uint32_t nowMs = millis();
@@ -2109,24 +2857,37 @@ void storageTask() {
   const uint32_t sdLogPeriodMs = recoveryMode ? RECOVERY_SD_LOG_UPDATE_MS : SD_LOG_UPDATE_MS;
   const uint32_t nandLogPeriodMs = recoveryMode ? RECOVERY_NAND_LOG_UPDATE_MS : NAND_LOG_UPDATE_MS;
 
+  NandCloseReason finalizeReason = NAND_CLOSE_NONE;
   if (flightState != lastFlightState) {
     logNandEventBinary(nowMs, EVT_STATE_CHANGE, lastFlightState, flightState, NAND_CLOSE_NONE);
     if (flightState == FS_LANDED) {
       setFinderBeeper(true);
-      finalizeLogFiles(NAND_CLOSE_LANDED);
+      finalizeReason = NAND_CLOSE_LANDED;
     } else if (flightState == FS_ABORT) {
-      finalizeLogFiles(NAND_CLOSE_ABORT);
+      finalizeReason = NAND_CLOSE_ABORT;
     }
     lastFlightState = flightState;
   }
+
+  drainNandEventQueue();
 
   if (taskDue(nowMs, lastNandLogMs, nandLogPeriodMs)) {
     logNandBinary();
   }
 
+#if SD_RUNTIME_LOG_ENABLE
   if (taskDue(nowMs, lastSdLogMs, sdLogPeriodMs)) {
     logSdCsv();
   }
+#else
+  (void)lastSdLogMs;
+  (void)sdLogPeriodMs;
+#endif
+
+  if (finalizeReason != NAND_CLOSE_NONE) {
+    finalizeLogFiles(finalizeReason);
+  }
 
   flushLogsIfDue();
+  timingRecordStorage(STORAGE_TIMING_TASK, micros() - timingStartUs);
 }

@@ -11,13 +11,19 @@ extern uint8_t beepPattern;
 extern bool serviceModeActive;
 extern bool serviceModeSuccess;
 extern bool nandOk;
-extern bool sdOk;
+extern bool logOk;
 extern bool baroOk;
 extern bool imuOk;
 extern bool loraOk;
+extern bool batteryCrit;
+extern bool armSwitchSafe;
+extern FlightState flightState;
+extern uint32_t nandFlightCriticalDroppedRecords;
 
 bool isBaroFresh();
 bool isImuFresh();
+uint8_t currentLaunchStatus(uint16_t &waitSecondsOut);
+static void landedFinderSignal(uint32_t activeMs, bool &on, uint16_t &freq);
 
 void writeStatusLed(bool on) {
 #if STATUS_LED_ACTIVE_HIGH
@@ -33,21 +39,70 @@ void setLedMode(LedMode mode) {
   ledModeSinceMs = millis();
 }
 
+const char *ledModeName() {
+  switch (ledMode) {
+    case LED_MODE_BOOT: return "BOOT";
+    case LED_MODE_SAFE: return "SAFE";
+    case LED_MODE_ARMING: return "ARMING";
+    case LED_MODE_READY: return "READY_FLIGHT";
+    case LED_MODE_SERVICE:
+    case LED_MODE_SUCCESS: return "SERVICE";
+    case LED_MODE_LANDED: return "LANDED";
+    case LED_MODE_CRITICAL:
+    default: return "CRITICAL";
+  }
+}
+
 void updateLedModeFromHealth() {
-  if (serviceModeActive) return;
-  if (!nandOk) {
-    setLedMode(LED_MODE_ERROR_NAND);
-  } else if (!sdOk) {
-    setLedMode(LED_MODE_ERROR_SD);
-  } else if (!baroOk || !imuOk || !loraOk || !isBaroFresh() || !isImuFresh()) {
-    setLedMode(LED_MODE_ERROR_GENERAL);
-  } else {
+  const uint32_t nowMs = millis();
+  const bool criticalFault =
+      flightState == FS_ABORT ||
+      !nandOk ||
+      ((!serviceModeActive && !serviceModeSuccess) && !logOk) ||
+      !baroOk || !imuOk || !loraOk ||
+      !isBaroFresh() || !isImuFresh() ||
+      batteryCrit ||
+      nandFlightCriticalDroppedRecords > 0;
+  if (criticalFault) {
+    setLedMode(LED_MODE_CRITICAL);
+    return;
+  }
+  if (serviceModeActive) {
+    setLedMode(LED_MODE_SERVICE);
+    return;
+  }
+  if (serviceModeSuccess) {
+    if ((uint32_t)(nowMs - ledModeSinceMs) <= 3000u) {
+      setLedMode(LED_MODE_SUCCESS);
+      return;
+    }
+    serviceModeSuccess = false;
+  }
+
+  if (finderBeeperActive || flightState == FS_LANDED) {
+    setLedMode(LED_MODE_LANDED);
+    return;
+  }
+
+  uint16_t waitSeconds = 0;
+  const uint8_t launchStatus = currentLaunchStatus(waitSeconds);
+  (void)waitSeconds;
+  const bool flightActive =
+      flightState >= FS_ASCENT && flightState < FS_POST_FLIGHT_GROUND;
+  if (launchStatus == LAUNCH_STATUS_READY ||
+      launchStatus == LAUNCH_STATUS_LAUNCH_CHECK ||
+      launchStatus == LAUNCH_STATUS_FLIGHT ||
+      flightActive) {
     setLedMode(LED_MODE_READY);
+  } else if (armSwitchSafe) {
+    setLedMode(LED_MODE_SAFE);
+  } else {
+    setLedMode(LED_MODE_ARMING);
   }
 }
 
 bool startupHardwareOk() {
-  return nandOk && sdOk && baroOk && imuOk && loraOk;
+  return nandOk && baroOk && imuOk && loraOk && !batteryCrit;
 }
 
 void updateStatusLed() {
@@ -62,33 +117,30 @@ void updateStatusLed() {
     case LED_MODE_BOOT:
       on = ((nowMs / 500u) % 2u) == 0u;
       break;
-    case LED_MODE_READY:
+    case LED_MODE_SAFE:
       phase = nowMs % 2000u;
       on = phase < 80u;
       break;
-    case LED_MODE_SERVICE:
-      on = ((nowMs / 100u) % 2u) == 0u;
+    case LED_MODE_ARMING:
+      on = ((nowMs / 500u) % 2u) == 0u;
       break;
-    case LED_MODE_SUCCESS:
+    case LED_MODE_READY:
       on = true;
       break;
-    case LED_MODE_ERROR_SD:
+    case LED_MODE_SERVICE:
+    case LED_MODE_SUCCESS:
       phase = nowMs % 1200u;
       on = (phase < 120u) || (phase >= 240u && phase < 360u);
       break;
-    case LED_MODE_ERROR_NAND:
-      phase = nowMs % 1400u;
-      on = (phase < 100u) || (phase >= 200u && phase < 300u) || (phase >= 400u && phase < 500u);
+    case LED_MODE_LANDED: {
+      uint16_t unusedFreq = 0;
+      landedFinderSignal(nowMs - finderBeeperStartMs, on, unusedFreq);
       break;
-    case LED_MODE_ERROR_GENERAL:
+    }
+    case LED_MODE_CRITICAL:
     default:
-      on = ((nowMs / 250u) % 2u) == 0u;
+      on = ((nowMs / 100u) % 2u) == 0u;
       break;
-  }
-
-  if (serviceModeSuccess && (uint32_t)(nowMs - ledModeSinceMs) > 3000u) {
-    serviceModeSuccess = false;
-    updateLedModeFromHealth();
   }
 
   writeStatusLed(on);

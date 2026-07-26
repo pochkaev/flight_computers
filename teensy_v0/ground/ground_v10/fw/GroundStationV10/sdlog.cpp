@@ -2,6 +2,7 @@
 #include "config.h"
 #include "radio.h"
 #include "timekeeper.h"
+#include "power.h"
 #include <TinyGPSPlus.h>
 
 bool sdOK = false;
@@ -16,10 +17,17 @@ static uint32_t bootTimeMs = 0;
 static bool stampedMode = false;
 static bool forceOpenWithoutGpsTime = false;
 
-// Buffered logging to reduce SD flush overhead
-static char     logBuf[512];
-static uint16_t logBufLen = 0;
+// Buffered logging to reduce SD flush overhead. ARM alone keeps normal direct
+// SD logging active so a long pad wait cannot fill RAM. During the short
+// START/output/PWR_FIRE window, all SD operations are deferred so a slow card
+// cannot starve the 150 ms RS-485 command heartbeat. The 64 KiB buffer retains
+// the complete fire window plus concurrent ground/rocket rows.
+static char   logBuf[64UL * 1024UL];
+static size_t logBufLen = 0;
 static uint32_t lastFlushMs = 0;
+static bool launchCritical = false;
+static bool gpsRotateDeferred = false;
+static uint32_t launchCriticalDroppedLines = 0;
 
 extern TinyGPSPlus gps;
 
@@ -157,7 +165,7 @@ static void scanExisting() {
 static void buildFilename(char *out, size_t n) {
     uint32_t idx = nextLogIndex;
     GroundDateTime dt;
-    if (stampedMode && timekeeper_getDateTime(dt)) {
+    if (stampedMode && timekeeper_getCentralDateTime(dt)) {
         snprintf(out, n,
                  "ground_%04d%02d%02d_%02d%02d%02d_log%04lu.log",
                  dt.year,
@@ -212,7 +220,6 @@ void sdlog_ensureFile() {
 
     nextLogIndex++;
     logLineCount = 0;
-    logBufLen = 0;
     lastFlushMs = millis();
 
     logFile.println("#type,fields=csv");
@@ -223,12 +230,18 @@ void sdlog_ensureFile() {
 void sdlog_write(const char *line) {
     if (!sdOK) return;
     if (!logFile) {
-        sdlog_ensureFile();
-        if (!logFile) return;
+        if (!launchCritical) sdlog_ensureFile();
+        // While launch-critical, retaining the row in RAM is intentional.
+        // The file is opened only after the controls return to SAFE.
+        if (!logFile && !launchCritical) return;
     }
     size_t len = strlen(line);
     // Ensure there is space; if not, flush first
     if (len + 2 > sizeof(logBuf) - logBufLen) {
+        if (launchCritical) {
+            launchCriticalDroppedLines++;
+            return;
+        }
         flushBuffer();
         // If a single line is larger than buffer, write directly
         if (len + 2 > sizeof(logBuf)) {
@@ -246,7 +259,8 @@ void sdlog_write(const char *line) {
 
     uint32_t now = millis();
     // Periodic flush or when buffer is reasonably full
-    if ((now - lastFlushMs) > 200 || logBufLen > (sizeof(logBuf) / 2)) {
+    if (!launchCritical &&
+        ((now - lastFlushMs) > 200 || logBufLen > (sizeof(logBuf) / 2))) {
         flushBuffer();
     }
 }
@@ -256,9 +270,48 @@ void sdlog_write_now(const char *line) {
     sdlog_write(line);
 }
 
+void sdlog_setLaunchCritical(bool active) {
+    if (active == launchCritical) return;
+
+    launchCritical = active;
+    if (launchCritical) return;
+
+    // We are SAFE again. Complete any deferred timestamp-file transition first,
+    // then persist the launch rows accumulated in RAM.
+    if (gpsRotateDeferred) {
+        if (logFile) {
+            flushBuffer();
+            logFile.flush();
+            logFile.close();
+            logFile = File();
+        }
+        stampedMode = timekeeper_hasTime();
+        gpsRotateDeferred = false;
+    }
+
+    if (logBufLen > 0) {
+        sdlog_ensureFile();
+        flushBuffer();
+    }
+
+    if (launchCriticalDroppedLines > 0) {
+        char line[96];
+        snprintf(line, sizeof(line),
+                 "LOG_WARN,ms=%lu,launch_buffer_dropped=%lu",
+                 (unsigned long)millis(),
+                 (unsigned long)launchCriticalDroppedLines);
+        launchCriticalDroppedLines = 0;
+        sdlog_write(line);
+    }
+}
+
 void sdlog_onGpsTimeAvailable() {
     sdlog_hasGpsTime = true;
     if (!sdOK) return;
+    if (launchCritical) {
+        gpsRotateDeferred = true;
+        return;
+    }
     if (logFile && !stampedMode) {
         logFile.flush();
         logFile.close();
@@ -275,6 +328,228 @@ void sdlog_close() {
         logFile = File();
     }
     currentLogIndex = 0;
+}
+
+bool sdlog_serviceSafe() {
+    return !launchCritical &&
+           !pwr_anyArmed &&
+           digitalRead(PWR_ARM_A_PIN) == HIGH &&
+           digitalRead(PWR_ARM_B_PIN) == HIGH &&
+           digitalRead(PWR_START_A_PIN) == HIGH &&
+           digitalRead(PWR_START_B_PIN) == HIGH;
+}
+
+void sdlog_printStatus(Stream &out) {
+    out.println("STORAGE STATUS");
+    out.print("SD_OK "); out.println(sdOK ? 1 : 0);
+    out.print("LOG_OPEN "); out.println(logFile ? 1 : 0);
+    out.print("CURRENT_LOG_INDEX "); out.println(currentLogIndex);
+    out.print("NEXT_LOG_INDEX "); out.println(nextLogIndex);
+    out.print("LOG_LINES "); out.println(logLineCount);
+    out.print("LOG_BUFFER_BYTES "); out.println(logBufLen);
+    out.print("LAUNCH_CRITICAL "); out.println(launchCritical ? 1 : 0);
+    out.print("STORAGE_SERVICE_SAFE "); out.println(sdlog_serviceSafe() ? 1 : 0);
+    out.println("STORAGE STATUS END");
+}
+
+void sdlog_list(Stream &out) {
+    out.println("SD LIST BEGIN");
+    if (!sdOK) {
+        out.println("ERR SD unavailable");
+        out.println("SD LIST END COUNT 0");
+        return;
+    }
+    File root = SD.open("/");
+    if (!root) {
+        out.println("ERR SD root");
+        out.println("SD LIST END COUNT 0");
+        return;
+    }
+    uint32_t count = 0;
+    while (true) {
+        File f = root.openNextFile();
+        if (!f) break;
+        out.print(f.isDirectory() ? "SD_DIR NAME " : "SD_FILE NAME ");
+        out.print(f.name());
+        if (!f.isDirectory()) {
+            out.print(" BYTES ");
+            out.print((uint32_t)f.size());
+        }
+        out.println();
+        count++;
+        f.close();
+    }
+    root.close();
+    out.print("SD LIST END COUNT "); out.println(count);
+}
+
+static bool safeStorageName(const char *name) {
+    if (!name || !*name || strlen(name) > 80) return false;
+    if (strstr(name, "..") || strchr(name, '/') || strchr(name, '\\')) return false;
+    for (const char *p = name; *p; ++p) {
+        const char c = *p;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool isGroundLogName(const char *name) {
+    if (!safeStorageName(name) || strncmp(name, "ground", 6) != 0) return false;
+    const size_t length = strlen(name);
+    return length >= 4 && strcmp(name + length - 4, ".log") == 0;
+}
+
+struct __attribute__((packed)) SerialTransferFrame {
+    char magic[4];
+    uint8_t version;
+    uint8_t backend;
+    uint16_t flags;
+    uint32_t sequence;
+    uint32_t offset;
+    uint16_t length;
+    uint16_t reserved;
+    uint32_t crc32;
+};
+static_assert(sizeof(SerialTransferFrame) == 24, "SerialTransferFrame size mismatch");
+
+static uint32_t updateCrc32(uint32_t crc, const uint8_t *data, size_t length) {
+    while (length-- > 0) {
+        crc ^= *data++;
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(crc & 1u));
+        }
+    }
+    return crc;
+}
+
+bool sdlog_info(const char *name, Stream &out) {
+    if (!sdOK || !safeStorageName(name)) {
+        out.println("ERR SD INFO name");
+        return false;
+    }
+    File f = SD.open(name, FILE_READ);
+    if (!f || f.isDirectory()) {
+        if (f) f.close();
+        out.println("ERR SD INFO not found");
+        return false;
+    }
+    out.print("SD INFO NAME "); out.print(name);
+    out.print(" BYTES "); out.println((uint32_t)f.size());
+    f.close();
+    return true;
+}
+
+bool sdlog_read(const char *name, uint32_t offset, uint32_t requestedLength,
+                Stream &out) {
+    if (!sdOK || !safeStorageName(name)) {
+        out.println("ERR SD READ name");
+        return false;
+    }
+    sdlog_close();
+    File f = SD.open(name, FILE_READ);
+    if (!f || f.isDirectory()) {
+        if (f) f.close();
+        out.println("ERR SD READ not found");
+        return false;
+    }
+    const uint32_t fileSize = (uint32_t)f.size();
+    if (offset > fileSize || !f.seek(offset)) {
+        f.close();
+        out.println("ERR SD READ offset");
+        return false;
+    }
+    uint32_t transferLength = fileSize - offset;
+    if (requestedLength != 0 && requestedLength < transferLength) {
+        transferLength = requestedLength;
+    }
+    out.print("XFER BEGIN BACKEND SD NAME "); out.print(name);
+    out.print(" SIZE "); out.print(fileSize);
+    out.print(" OFFSET "); out.print(offset);
+    out.print(" LENGTH "); out.print(transferLength);
+    out.println(" CHUNK 1024");
+
+    uint8_t payload[1024];
+    uint32_t sent = 0;
+    uint32_t sequence = 0;
+    uint32_t runningCrc = 0xFFFFFFFFu;
+    while (sent < transferLength) {
+        if (!sdlog_serviceSafe()) {
+            f.close();
+            out.println("\nXFER ERROR LOCKED");
+            return false;
+        }
+        const uint16_t wanted =
+            (uint16_t)min((uint32_t)sizeof(payload), transferLength - sent);
+        const int got = f.read(payload, wanted);
+        if (got <= 0) {
+            f.close();
+            out.println("\nXFER ERROR READ");
+            return false;
+        }
+        const uint16_t payloadLength = (uint16_t)got;
+        const uint32_t payloadCrc =
+            updateCrc32(0xFFFFFFFFu, payload, payloadLength) ^ 0xFFFFFFFFu;
+        runningCrc = updateCrc32(runningCrc, payload, payloadLength);
+        SerialTransferFrame frame = {};
+        memcpy(frame.magic, "RVXF", 4);
+        frame.version = 1;
+        frame.backend = 2;
+        frame.flags = (sent + payloadLength == transferLength) ? 1u : 0u;
+        frame.sequence = sequence++;
+        frame.offset = offset + sent;
+        frame.length = payloadLength;
+        frame.crc32 = payloadCrc;
+        out.write((const uint8_t *)&frame, sizeof(frame));
+        out.write(payload, payloadLength);
+        sent += payloadLength;
+    }
+    f.close();
+    out.print("\nXFER END BYTES "); out.print(sent);
+    out.print(" CRC32 ");
+    char crcText[9];
+    snprintf(crcText, sizeof(crcText), "%08lX",
+             (unsigned long)(runningCrc ^ 0xFFFFFFFFu));
+    out.println(crcText);
+    return true;
+}
+
+bool sdlog_eraseLogs(uint32_t &removedCount) {
+    removedCount = 0;
+    if (!sdOK) return false;
+    sdlog_close();
+    File root = SD.open("/");
+    if (!root) return false;
+    bool allOk = true;
+    while (true) {
+        File f = root.openNextFile();
+        if (!f) break;
+        if (!f.isDirectory() && isGroundLogName(f.name())) {
+            char name[96];
+            strncpy(name, f.name(), sizeof(name) - 1);
+            name[sizeof(name) - 1] = '\0';
+            f.close();
+            if (SD.remove(name)) removedCount++;
+            else allOk = false;
+            continue;
+        }
+        f.close();
+    }
+    root.close();
+    nextLogIndex = 1;
+    scanExisting();
+    return allOk;
+}
+
+bool sdlog_mount() {
+    sdlog_close();
+    pinMode(SD_CS_PIN, OUTPUT);
+    digitalWrite(SD_CS_PIN, HIGH);
+    sdOK = SD.begin(SD_CS_PIN);
+    if (sdOK) scanExisting();
+    return sdOK;
 }
 
 void sdlog_init() {

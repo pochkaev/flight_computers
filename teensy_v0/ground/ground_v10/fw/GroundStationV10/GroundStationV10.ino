@@ -7,6 +7,7 @@
 #include "ui.h"
 #include "power.h"
 #include "timekeeper.h"
+#include "settings.h"
 
 static uint32_t lastPadLogMs = 0;
 static uint32_t lastLostLogMs = 0;
@@ -69,7 +70,7 @@ static float rocketRelAltM() {
 void log_snapshot(const char *type, FlightPhase ph) {
     char line[768];
     snprintf(line, sizeof(line),
-        "%s,ms=%lu,phase=%s,rocket_state=%s,flags=%u,"
+        "%s,ms=%lu,ground_fw=%s,phase=%s,rocket_state=%s,flags=%u,"
         "rkt_alt_baro=%.1f,rkt_rel_alt=%.1f,rkt_vel=%.1f,"
         "rkt_lat=%.6f,rkt_lon=%.6f,rkt_gps_alt=%.1f,rkt_fix=%u,rkt_sats=%u,rkt_hdop=%.1f,"
         "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_temp_c=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
@@ -84,6 +85,7 @@ void log_snapshot(const char *type, FlightPhase ph) {
         "time_src=%s,time_valid=%u",
         type,
         (unsigned long)millis(),
+        GROUND_FW_VERSION,
         phaseName(ph),
         rocketStateLogName(),
         (unsigned int)rktFlags,
@@ -146,13 +148,14 @@ void log_ground() {
     char line[512];
 #if ENABLE_POWER_MODULE
     snprintf(line, sizeof(line),
-        "GND,ms=%lu,"
+        "GND,ms=%lu,ground_fw=%s,"
         "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_temp_c=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
         "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u,"
         "gnd_v=%.2f,gnd_pack=%s,gnd_batt_status=%s,ign_v=%.1f,ia=%.1f,ib=%.1f,"
-        "pwr_key=%u,presA=%u,presB=%u,fault=%u,onA=%u,onB=%u,pwr_link=%u,pwr_rx_rate=%u,"
+        "pwr_key=%u,presA=%u,presB=%u,fault=%u,onA=%u,onB=%u,pwr_link=%u,pwr_rx_rate=%u,pwr_tx_gap_ms=%u,pwr_tx_gap_max_ms=%u,"
         "rocket_seen=%u,rocket_age_s=%.1f,time_src=%s,time_valid=%u",
         (unsigned long)millis(),
+        GROUND_FW_VERSION,
         gndLat,
         gndLon,
         gndAltGpsM,
@@ -178,18 +181,21 @@ void log_ground() {
         pwr_onB ? 1u : 0u,
         power_link_fresh() ? 1u : 0u,
         (unsigned int)pwr_rxRate,
+        (unsigned int)pwr_lastTxGapMs,
+        (unsigned int)pwr_maxTxGapMs,
         rocketLastPacketMs != 0 ? 1u : 0u,
         ageSeconds(rocketLastPacketMs),
         timekeeper_source_name(),
         timekeeper_hasTime() ? 1u : 0u);
 #else
     snprintf(line, sizeof(line),
-        "GND,ms=%lu,"
+        "GND,ms=%lu,ground_fw=%s,"
         "gnd_lat=%.6f,gnd_lon=%.6f,gnd_alt_gps=%.1f,gnd_alt_baro=%.1f,gnd_temp_c=%.1f,gnd_sats=%u,gnd_hdop=%.1f,"
         "gnd_gps_chars=%lu,gnd_gps_pass=%lu,gnd_gps_fail=%lu,gnd_loc_valid=%u,"
         "gnd_v=%.2f,gnd_pack=%s,gnd_batt_status=%s,"
         "rocket_seen=%u,rocket_age_s=%.1f,time_src=%s,time_valid=%u",
         (unsigned long)millis(),
+        GROUND_FW_VERSION,
         gndLat,
         gndLon,
         gndAltGpsM,
@@ -232,8 +238,9 @@ void setup() {
     Serial.begin(115200);
     delay(500);
 
-    DBG1("Booting GroundStation V10...");
+    DBG1(String("Booting GroundStation V10 ") + GROUND_FW_VERSION);
 
+    groundSettingsInit();
     sensors_init();
     radio_init();
     timekeeper_init();
@@ -247,8 +254,18 @@ void setup() {
 }
 
 void loop() {
+#if ENABLE_POWER_MODULE
+    power_update();
+#endif
+    groundSettingsTask();
     sensors_update();
+#if ENABLE_POWER_MODULE
+    power_update();
+#endif
     radio_update();
+#if ENABLE_POWER_MODULE
+    power_update();
+#endif
     bool timeChanged = timekeeper_update();
 #if ENABLE_POWER_MODULE
     power_update();
@@ -302,5 +319,11 @@ void loop() {
             break;
     }
 
+#if ENABLE_POWER_MODULE
+    power_update();
+#endif
     ui_update();
+#if ENABLE_POWER_MODULE
+    power_update();
+#endif
 }

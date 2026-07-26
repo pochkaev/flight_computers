@@ -26,12 +26,13 @@ enum BatteryPackType : uint8_t {
 
 enum LedMode : uint8_t {
   LED_MODE_BOOT = 0,
+  LED_MODE_SAFE,
+  LED_MODE_ARMING,
   LED_MODE_READY,
   LED_MODE_SERVICE,
   LED_MODE_SUCCESS,
-  LED_MODE_ERROR_SD,
-  LED_MODE_ERROR_NAND,
-  LED_MODE_ERROR_GENERAL
+  LED_MODE_LANDED,
+  LED_MODE_CRITICAL
 };
 
 static const uint16_t FLAG_LAUNCH = 1 << 0;
@@ -51,6 +52,10 @@ static const uint16_t DIAG_BARO_GPS_DIVERGE = 1 << 0;
 static const uint16_t DIAG_ATT_ACCEL_CORR = 1 << 1;
 static const uint16_t DIAG_ATT_MAG_CORR = 1 << 2;
 static const uint16_t DIAG_ATT_GYRO_ONLY = 1 << 3;
+static const uint16_t DIAG_ARM_SWITCH_SAFE = 1 << 4;
+static const uint16_t DIAG_ARM_SAFE_OBSERVED = 1 << 5;
+static const uint16_t DIAG_LAUNCH_CANDIDATE = 1 << 6;
+static const uint16_t DIAG_TOUCHDOWN_CANDIDATE = 1 << 7;
 
 enum FlightEventType : uint8_t {
   EVT_STATE_CHANGE = 1,
@@ -203,6 +208,18 @@ extern uint32_t lastGpsFixMs;
 extern uint32_t lastGpsBaseUpdateMs;
 extern uint32_t padSettleStartMs;
 extern bool launchArmed;
+extern bool armSwitchSafe;
+extern bool armSafeObservedSinceBoot;
+extern bool launchCandidateActive;
+extern bool touchdownCandidateActive;
+extern bool touchdownImpactQualified;
+extern uint32_t armSwitchRawSinceMs;
+extern uint32_t armSwitchSafeSinceMs;
+extern uint32_t launchCandidateSinceMs;
+extern uint32_t launchImuSinceMs;
+extern uint32_t touchdownCandidateSinceMs;
+extern uint32_t touchdownSoftSinceMs;
+extern uint32_t touchdownStableSinceMs;
 extern bool apogeeChargeLogged;
 extern bool mainChargeLogged;
 extern bool boosterBurnoutLogged;

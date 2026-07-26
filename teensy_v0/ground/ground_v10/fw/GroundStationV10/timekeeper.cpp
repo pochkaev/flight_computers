@@ -1,6 +1,7 @@
 #include "timekeeper.h"
 #include "config.h"
 #include "radio.h"
+#include "settings.h"
 #include <TinyGPSPlus.h>
 #include <TimeLib.h>
 
@@ -36,42 +37,6 @@ static uint8_t daysInMonth(uint16_t y, uint8_t m) {
     if (m == 2 && isLeapYear(y)) return 29;
     if (m < 1 || m > 12) return 31;
     return days[m - 1];
-}
-
-static uint8_t dayOfWeek0Sunday(uint16_t y, uint8_t m, uint8_t d) {
-    // Sakamoto algorithm. Returns 0=Sunday, 1=Monday, ... 6=Saturday.
-    static const uint8_t offsets[] = { 0,3,2,5,0,3,5,1,4,6,2,4 };
-    if (m < 3) y -= 1;
-    return (y + y / 4 - y / 100 + y / 400 + offsets[m - 1] + d) % 7;
-}
-
-static uint8_t nthSunday(uint16_t y, uint8_t month, uint8_t n) {
-    uint8_t firstDow = dayOfWeek0Sunday(y, month, 1);
-    uint8_t day = 1 + ((7 - firstDow) % 7) + (n - 1) * 7;
-    uint8_t maxDay = daysInMonth(y, month);
-    return day > maxDay ? maxDay : day;
-}
-
-static time_t utcBoundary(uint16_t y, uint8_t month, uint8_t day, uint8_t hourUtc) {
-    tmElements_t tm;
-    tm.Year = CalendarYrToTm(y);
-    tm.Month = month;
-    tm.Day = day;
-    tm.Hour = hourUtc;
-    tm.Minute = 0;
-    tm.Second = 0;
-    return makeTime(tm);
-}
-
-static bool centralUsesDst(time_t utc) {
-    uint16_t y = year(utc);
-    if (!saneYear(y)) return false;
-    // US Central Time:
-    // DST starts second Sunday in March at 02:00 CST = 08:00 UTC.
-    // DST ends first Sunday in November at 02:00 CDT = 07:00 UTC.
-    time_t dstStart = utcBoundary(y, 3, nthSunday(y, 3, 2), 8);
-    time_t dstEnd = utcBoundary(y, 11, nthSunday(y, 11, 1), 7);
-    return utc >= dstStart && utc < dstEnd;
 }
 
 static bool gpsHasSaneTime() {
@@ -121,6 +86,7 @@ bool timekeeper_update() {
 #if defined(TEENSYDUINO)
     Teensy3Clock.set(now());
 #endif
+    groundSettingsMarkRtcUtc(true, true);
 
     lastGpsRtcSetMs = nowMs;
     bool changed = currentSource != TIME_SRC_GPS || !haveValidTime;
@@ -160,14 +126,39 @@ bool timekeeper_getDateTime(GroundDateTime &dt) {
 
 bool timekeeper_getCentralDateTime(GroundDateTime &dt) {
     if (!timekeeper_hasTime()) return false;
-    time_t utc = now();
-    int32_t offsetSeconds = centralUsesDst(utc) ? -5L * 3600L : -6L * 3600L;
-    time_t t = utc + offsetSeconds;
+    time_t t = now();
+    // Existing Ground RTCs contain local wall time. Once GPS has synchronized
+    // the RTC it contains UTC, so apply the configured offset only then.
+    if (currentSource == TIME_SRC_GPS || groundSettingsRtcIsUtc()) {
+        t += (int32_t)groundSettingsTimezoneOffsetMin() * 60L;
+    }
     dt.year = year(t);
     dt.month = month(t);
     dt.day = day(t);
     dt.hour = hour(t);
     dt.minute = minute(t);
     dt.second = second(t);
+    return true;
+}
+
+bool timekeeper_setDateTime(uint16_t yearValue, uint8_t monthValue, uint8_t dayValue,
+                            uint8_t hourValue, uint8_t minuteValue, uint8_t secondValue,
+                            bool utcBasis) {
+    if (!saneYear(yearValue) ||
+        monthValue < 1 || monthValue > 12 ||
+        dayValue < 1 || dayValue > daysInMonth(yearValue, monthValue) ||
+        hourValue > 23 || minuteValue > 59 || secondValue > 59) {
+        return false;
+    }
+
+    setTime(hourValue, minuteValue, secondValue,
+            dayValue, monthValue, yearValue);
+#if defined(TEENSYDUINO)
+    Teensy3Clock.set(now());
+#endif
+    haveValidTime = true;
+    currentSource = TIME_SRC_RTC;
+    lastGpsRtcSetMs = 0;
+    groundSettingsMarkRtcUtc(utcBasis, true);
     return true;
 }

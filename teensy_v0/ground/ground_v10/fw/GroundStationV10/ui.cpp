@@ -5,6 +5,7 @@
 #include "sdlog.h"
 #include "power.h"
 #include "timekeeper.h"
+#include "settings.h"
 #include <ILI9341_t3.h>
 #include <SPI.h>
 
@@ -64,7 +65,7 @@ static float packetAgeS(uint32_t lastMs) {
 }
 
 static bool rocketLinkFresh() {
-    return rocketLastPacketMs != 0 && (millis() - rocketLastPacketMs) <= LINK_LOST_MS;
+    return rocketLastPacketMs != 0 && (millis() - rocketLastPacketMs) <= groundSettingsLinkLostMs();
 }
 
 static void formatGroundTime(char *out, size_t n) {
@@ -150,7 +151,7 @@ void ui_nextPage() {
 
 static const char* rocketOverallStatus() {
     uint32_t age = millis() - rocketLastPacketMs;
-    if (age > LINK_LOST_MS) return "FAULT";
+    if (age > groundSettingsLinkLostMs()) return "FAULT";
     if (rocketBattCrit) return "CRIT";
     if (rocketBattWarn) return "WARN";
     if (!rocketImuOk || !rocketBaroOk) return "WARN";
@@ -168,7 +169,7 @@ static uint16_t rocketOverallStatusColor() {
 static const char* rocketLinkStatus() {
     if (rocketLastPacketMs == 0) return "---";
     uint32_t age = millis() - rocketLastPacketMs;
-    if (age > LINK_LOST_MS) return "LOST";
+    if (age > groundSettingsLinkLostMs()) return "LOST";
     return "OK";
 }
 
@@ -271,11 +272,20 @@ static bool drawPyroFlashIfActive(uint32_t now) {
 
 static const char* rocketLaunchStatusName() {
     switch (rocketLaunchStatus) {
-        case LAUNCH_STATUS_INHIBIT:    return "BOOT WAIT";
-        case LAUNCH_STATUS_WAIT_STILL: return "SETTLING";
-        case LAUNCH_STATUS_READY:      return "READY";
-        case LAUNCH_STATUS_FLIGHT:     return "FLIGHT";
-        default:                       return "UNKNOWN";
+        case LAUNCH_STATUS_BOOT_WAIT:     return "BOOT";
+        case LAUNCH_STATUS_SAFE_REQUIRED: return "INSERT PIN";
+        case LAUNCH_STATUS_SAFE:          return "SAFE";
+        case LAUNCH_STATUS_PAD_SETTLE:    return "PAD SETTLE";
+        case LAUNCH_STATUS_SENSOR_FAULT:  return "SENSOR ERR";
+        case LAUNCH_STATUS_LOG_FAULT:     return "LOG ERR";
+        case LAUNCH_STATUS_BATT_CRIT:     return "BATT CRIT";
+        case LAUNCH_STATUS_HOLD_VERTICAL: return "VERTICAL";
+        case LAUNCH_STATUS_HOLD_STILL:    return "HOLD STILL";
+        case LAUNCH_STATUS_ARMING:        return "ARMING";
+        case LAUNCH_STATUS_READY:         return "READY";
+        case LAUNCH_STATUS_LAUNCH_CHECK:  return "LAUNCH CHECK";
+        case LAUNCH_STATUS_FLIGHT:        return "FLIGHT";
+        default:                          return "UNKNOWN";
     }
 }
 
@@ -322,8 +332,18 @@ static uint16_t rocketLaunchStatusColor() {
         case LAUNCH_STATUS_READY:
         case LAUNCH_STATUS_FLIGHT:
             return COLOR_OK;
-        case LAUNCH_STATUS_INHIBIT:
-        case LAUNCH_STATUS_WAIT_STILL:
+        case LAUNCH_STATUS_SENSOR_FAULT:
+        case LAUNCH_STATUS_LOG_FAULT:
+        case LAUNCH_STATUS_BATT_CRIT:
+            return COLOR_BAD;
+        case LAUNCH_STATUS_BOOT_WAIT:
+        case LAUNCH_STATUS_SAFE_REQUIRED:
+        case LAUNCH_STATUS_SAFE:
+        case LAUNCH_STATUS_PAD_SETTLE:
+        case LAUNCH_STATUS_HOLD_VERTICAL:
+        case LAUNCH_STATUS_HOLD_STILL:
+        case LAUNCH_STATUS_ARMING:
+        case LAUNCH_STATUS_LAUNCH_CHECK:
             return COLOR_WARN;
         default:
             return COLOR_BAD;
@@ -556,12 +576,15 @@ static void drawRocketStatus() {
     float relAlt = rocketRelAltM();
 
     clearTextRow(HDR_H + 8, 42);
-    tft.setTextSize(3);
+    const char *readyName = rocketReadyDisplayName();
+    tft.setTextSize(strlen(readyName) > 10 ? 2 : 3);
     tft.setCursor(10, HDR_H + 14);
     tft.setTextColor(rocketReadyDisplayColor(), COLOR_BG);
-    tft.print(rocketReadyDisplayName());
+    tft.print(readyName);
     if (rocketFlightState == FS_PAD &&
-        (rocketLaunchStatus == LAUNCH_STATUS_INHIBIT || rocketLaunchStatus == LAUNCH_STATUS_WAIT_STILL)) {
+        (rocketLaunchStatus == LAUNCH_STATUS_BOOT_WAIT ||
+         rocketLaunchStatus == LAUNCH_STATUS_PAD_SETTLE ||
+         rocketLaunchStatus == LAUNCH_STATUS_ARMING)) {
         tft.setTextSize(2);
         tft.print(" ");
         tft.print((unsigned int)rocketLaunchWaitS);
@@ -910,8 +933,10 @@ static void drawLaunch() {
         tft.setTextColor(COLOR_TEXT, COLOR_BG);
     } else {
         tft.print("A:");
-        tft.setTextColor(pwr_key_ok ? COLOR_OK : COLOR_WARN, COLOR_BG);
-        tft.print(pwr_key_ok ? (pwr_armA_seen ? "ARM " : "SAFE") : "LOCK");
+        tft.setTextColor(pwr_armA_rearmRequired ? COLOR_WARN :
+                         (pwr_key_ok ? COLOR_OK : COLOR_WARN), COLOR_BG);
+        tft.print(pwr_armA_rearmRequired ? "REARM" :
+                  (pwr_key_ok ? (pwr_armA_seen ? "ARM " : "SAFE") : "LOCK"));
         tft.setTextColor(COLOR_TEXT, COLOR_BG);
         tft.print(" ");
         tft.print(pwr_onA ? "[ON]" : "[  ]");
@@ -924,8 +949,10 @@ static void drawLaunch() {
 
         tft.setCursor(10, HDR_H + 68);
         tft.print("B:");
-        tft.setTextColor(pwr_key_ok ? COLOR_OK : COLOR_WARN, COLOR_BG);
-        tft.print(pwr_key_ok ? (pwr_armB_seen ? "ARM " : "SAFE") : "LOCK");
+        tft.setTextColor(pwr_armB_rearmRequired ? COLOR_WARN :
+                         (pwr_key_ok ? COLOR_OK : COLOR_WARN), COLOR_BG);
+        tft.print(pwr_armB_rearmRequired ? "REARM" :
+                  (pwr_key_ok ? (pwr_armB_seen ? "ARM " : "SAFE") : "LOCK"));
         tft.setTextColor(COLOR_TEXT, COLOR_BG);
         tft.print(" ");
         tft.print(pwr_onB ? "[ON]" : "[  ]");

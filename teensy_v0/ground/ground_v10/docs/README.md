@@ -35,9 +35,15 @@ This firmware runs on the ground controller and:
 - all pages have a bottom status strip for link, battery, or system warning state
 - `[READY]` focuses on launch readiness, system status, battery, GPS, link quality, and rocket health
 - while the rocket is still in `PAD`, the large READY-page state shows the rocket launch gate:
-  - `BOOT WAIT`: launch detection is inhibited after power-up
-  - `SETTLING`: the rocket must stay still on the pad
+  - `BOOT Ns`: the 60 s power-on inhibit is counting down
+  - `INSERT PIN`: SAFE has not yet been observed since this boot
+  - `SAFE`: the removable SAFE pin is inserted
+  - `PAD SETTLE`: the barometric pad baseline is still settling
+  - `SENSOR ERR`, `LOG ERR`, or `BATT CRIT`: a required readiness check failed
+  - `VERTICAL` or `HOLD STILL`: pad orientation/motion is preventing verification
+  - `ARMING Ns`: all checks pass and the continuous 10 s verification is counting down
   - `READY`: launch detection is armed
+  - `LAUNCH CHECK`: transient launch evidence is being confirmed
 - `[LOST]` is recovery-focused and shows age, RSSI, battery, distance, bearing, and last known coordinates
 - `SYS` ignores rocket GPS state; GPS is shown separately as informational status
 - packet miss accounting ignores sequence rollbacks/resets from sender reboot
@@ -132,6 +138,10 @@ I verified the ground station against the rocket firmware:
 - payload layouts match the current rocket packet definitions
 - the ground station uses the same health-bit meanings as the rocket status packet
 - the launch page uses actual RS-485 power-module state, not stub data
+- active rocket states received through status/event packets drive the ground
+  FLIGHT/RECOVERY phase even when full flight packets are unavailable
+- the ground pad-altitude baseline stops updating as soon as an active rocket
+  flight state is received
 
 ## Electrical notes
 
@@ -415,11 +425,14 @@ Indicators:
 
 Buzzer behavior:
 
-- ARM turns on: short rising chirp
-- ARM remains on: clear heartbeat, about 2 beeps per second
-- ARM remains on longer than 60 seconds: faster urgent heartbeat
-- START is held while armed: solid high tone
-- ARM turns off: short lower safe chirp
+- With no fresh RS-485 Power-module link, raw A/B ARM switches are silent and
+  cannot arm either lane.
+- Arming while disconnected, or losing the link while armed, latches `REARM`.
+  Return that channel to SAFE and ARM it again after the link is healthy.
+- A link-qualified ARM edge produces the short rising chirp.
+- A valid ARM state produces the heartbeat, faster after 60 seconds.
+- START held while validly armed produces the solid high tone.
+- A valid ARM-to-SAFE edge produces the lower safe chirp.
 
 ### 8. Ground battery measurement
 
@@ -499,9 +512,16 @@ Current chip selects:
 ## Behavior notes
 
 - ARM and START inputs are active low
-- the launch page appears automatically when either ARM switch turns on
+- the launch page appears automatically only for a link-qualified ARM state
+- a raw ARM transition without a fresh RS-485 status link is invalid and silent
+- link loss invalidates both arms; link recovery requires SAFE -> ARM again
+- the Launch page displays `REARM` for an invalid raw ARM state
 - firing is blocked if the RS-485 link is stale, the key is missing, or a fault is active
 - the master-side fire timeout is `10 s` per lane
+- ARM alone continues normal direct SD logging, so a long armed pad wait cannot
+  fill RAM
+- during START, acknowledged output, and the 3-second fire-sampling window, SD
+  operations are deferred and rows are retained in a 64 KiB RAM buffer
 - the current safer build reduces debug output and rate-limits flight logging to reduce shared-bus load
 
 ## Display screens and field meanings
@@ -637,6 +657,77 @@ Manual diagnostic page for link and navigation quality.
 | `GPS nSV` | Rocket GPS satellite count. |
 | `HDOP` | Rocket GPS horizontal dilution of precision. Lower is better. |
 
+## Test-flight build `gv10.20260724f`
+
+This build preserves standalone Ground launch operation: Rocket presence, link,
+and READY are not launch interlocks. It:
+
+- disables LoRa payload CRC to match Rocket `rv10.20260724f`
+- restores the original SF7 / 125 kHz / CR 4:5 receiver profile
+- validates packet versions, Rocket state, coordinates, altitude, battery, and
+  launch-status ranges before using received data
+- counts valid status packets as live Rocket link traffic, while periodic pyro
+  configuration packets no longer mask missing flight/status/navigation data
+- rejects stale TinyGPS++ fixes
+- polls LoRa from the main loop instead of performing receive-side SPI work in
+  the DIO0 interrupt callback
+- services the RS-485 power path repeatedly around sensor, radio, timekeeper,
+  logging, and TFT work, with the command period reduced from 150 ms to 100 ms
+- records current and maximum RS-485 transmit gaps in `GND` and `PWR_FIRE` rows
+
+The existing launch-critical RAM buffer and genuine-link-loss REARM behavior
+remain in place.
+
+### USB serial settings and SD service
+
+Ground supports `STORAGE STATUS`, `SD MOUNT`, `SD LIST`, `SD INFO <filename>`,
+`SD READ <filename> <offset> <length>`, and
+`SD ERASE LOGS CONFIRM`. SD operations are rejected unless both ARM switches
+are SAFE and both START buttons are released. Downloads use the same
+checksummed/resumable protocol and
+`rocket/rocket_v10/tools/flight_storage.py` client as Rocket:
+
+```text
+python3 ../../rocket/rocket_v10/tools/flight_storage.py \
+  --port /dev/cu.usbmodem... list sd
+python3 ../../rocket/rocket_v10/tools/flight_storage.py \
+  --port /dev/cu.usbmodem... download sd ground_log0001.log ground_log0001.log
+```
+
+Connect at `115200` baud and terminate each command with Enter. `SHOW` reports
+the active values, local display time, Rocket link freshness, packet age/counts,
+and last RSSI; `HELP` prints examples. `SET` changes RAM immediately and `SAVE`
+writes the current values to EEPROM. `DEFAULTS` restores compiled defaults in
+RAM.
+
+Supported settings are `TZ_OFFSET_MIN` (`-720..840`), `LORA_SF` (`6..12`),
+`LORA_BW` (`62500`, `125000`, `250000`, or `500000`), `LORA_CR` (`5..8`), and
+`LINK_LOST_MS` (`2000..60000`). RF settings must match Rocket. Example:
+
+```text
+SHOW
+SET TZ_OFFSET_MIN -300
+SET LINK_LOST_MS 10000
+SAVE
+```
+
+The RTC can be set explicitly as local wall time or UTC:
+
+```text
+TIME LOCAL 2026-07-24 22:47:00
+TIME UTC 2026-07-25 03:47:00
+```
+
+Ground remembers whether its RTC contains local or UTC time. GPS synchronization
+stores UTC and applies `TZ_OFFSET_MIN` for display and filenames. Existing RTCs
+that already contain local wall time are displayed directly, avoiding the old
+double-offset error.
+
+If the receiver starts without traffic or an established Rocket link becomes
+stale, Ground periodically re-enters LoRa receive mode. A failed LoRa boot
+initialization is retried every two seconds. `SHOW` reports `LORA_OK` and
+`LORA_REARM_COUNT` so recovery is visible without a debug build.
+
 ## SD logging behavior
 
 Ground logs sparse ground-only rows independently of rocket packets, plus richer rocket snapshot rows after the first rocket packet has been received.
@@ -657,5 +748,12 @@ Rocket snapshot rows include rocket state, altitude, velocity, GPS, ground GPS/b
 Power-module logging is intentionally sparse. Normal RS-485 status frames are used for the screen but are not written repeatedly to SD. A `PWR_START` row is written only on the rising edge of Start A or Start B. It includes the event name, timestamp, ignition voltage, ground-module voltage, channel currents, key/presence/fault state, local arm/start state, power-module arm/on state, RS-485 link freshness, and `time_src` / `time_valid`.
 
 After a Start A or Start B press, the ground station also writes `PWR_FIRE` rows every `PWR_FIRE_LOG_MS` (`100 ms`) for `PWR_FIRE_LOG_WINDOW_MS` (`3 s`). These rows capture the latest RS-485 power-module status during ignition and include `ia`, `ib`, the ground-observed `peak_ia` / `peak_ib` over that 3 second window, and `time_src` / `time_valid`.
+
+During START, acknowledged output, and the 3-second fire-sampling window, these
+rows and any concurrent ground/rocket rows remain in a 64 KiB RAM buffer. The
+firmware performs no SD open, write, flush, close, or GPS-time file rotation
+until that bounded launch-critical window ends. ARM alone continues normal SD
+logging. If the buffer ever fills, a later `LOG_WARN` row records the number of
+dropped rows.
 
 Power-module current note: the existing power-module firmware reports live channel current while a lane is armed normally. If a lane enters overcurrent/short fault, the same current field reports the power module's stored fault peak. The ground station does not change power-module firmware; it logs the values available on the existing RS-485 status protocol.

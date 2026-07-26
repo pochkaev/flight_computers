@@ -23,3 +23,6 @@ GroundTimeSource timekeeper_source();
 const char *timekeeper_source_name();
 bool timekeeper_getDateTime(GroundDateTime &dt);
 bool timekeeper_getCentralDateTime(GroundDateTime &dt);
+bool timekeeper_setDateTime(uint16_t year, uint8_t month, uint8_t day,
+                            uint8_t hour, uint8_t minute, uint8_t second,
+                            bool utcBasis);

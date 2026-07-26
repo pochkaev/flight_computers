@@ -87,6 +87,18 @@ Controls:
 - LED A `D22`
 - LED B `D23`
 
+Launch-power interlock:
+
+- A/B ARM is effective only after a fresh valid RS-485 status frame.
+- Arming without a link, or losing the link while armed, requires a physical
+  SAFE-to-ARM cycle after link recovery.
+- Invalid raw ARM is silent and shown as `REARM`.
+- ARM alone continues normal direct SD logging so a long armed pad wait cannot
+  fill RAM.
+- During START, acknowledged output, and the 3-second fire-sampling window,
+  rows accumulate in a 64 KiB RAM buffer and all SD operations are deferred.
+  The buffer is flushed when that bounded launch-critical window ends.
+
 Battery:
 
 - `PWR_VBAT_PIN = A0`
@@ -195,9 +207,15 @@ Common bottom strip:
 
 - rocket launch-readiness state is prominent but not full-screen
 - while the rocket is in `PAD`, the large state uses the decoded launch gate:
-  - `BOOT WAIT`
-  - `SETTLING`
+  - `BOOT Ns`
+  - `INSERT PIN`
+  - `SAFE`
+  - `PAD SETTLE`
+  - `SENSOR ERR` / `LOG ERR` / `BATT CRIT`
+  - `VERTICAL` / `HOLD STILL`
+  - `ARMING Ns`
   - `READY`
+  - `LAUNCH CHECK`
 - the READY page header stays as `[READY]`; the right-side header status was removed so it cannot duplicate or stale-display the launch gate
 - `SYS` is shown beside state
 - battery, GPS sats, compact `H` HDOP, link/RSSI/age, AGL/velocity/baro sanity checks, RX rates, and health labels are shown
@@ -340,6 +358,19 @@ That strongly suggests:
 
 So the standalone board is more stable than the assembled system, but not deeply characterized yet.
 
+## Test-flight candidate
+
+`gv10.20260724f` keeps Ground launch independent of any Rocket computer. It
+uses matching CRC-off LoRa settings and packet validation, uses status/flight/nav packets
+for Rocket link freshness, rejects stale GPS fixes, polls LoRa outside the
+receive ISR, services the power-module path repeatedly around slower tasks,
+sends commands every 100 ms, and logs current/maximum RS-485 TX gaps. The
+launch-critical SD buffer and link-loss REARM latch remain.
+
+This revision also fixes local-time display for legacy RTCs that already store
+local wall time and adds EEPROM-backed `SHOW` / `SET` / `TIME` / `SAVE` /
+`DEFAULTS` commands for allow-listed timezone, RF, and link-timeout values.
+
 ## Recommended next debug path
 
 If the assembled ground unit still misbehaves, isolate by attached subsystem:
@@ -404,3 +435,15 @@ Ground firmware is in a much better state than before:
 - `SYS` and `LOG` are active indicators
 
 But the assembled ground hardware still needs final stability verification with all peripherals attached.
+## 2026-07-25 field SD service update
+
+- Compiled Ground firmware: `gv10.20260725h`.
+- It implements `STORAGE STATUS`, `SD MOUNT`, `SD LIST`, `SD INFO`,
+  offset/length `SD READ`, and `SD ERASE LOGS CONFIRM`.
+- SD downloads use the same checksummed `RVXF` frames and
+  `rocket/rocket_v10/tools/flight_storage.py` client as Rocket.
+- Every SD operation is rejected unless both physical ARM switches are SAFE
+  and both START buttons are released. An active transfer aborts if a control
+  leaves SAFE.
+- The Ground controller was not visible over USB at final installation time,
+  so this build is compiled but not yet uploaded or hardware-validated.

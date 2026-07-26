@@ -13,6 +13,7 @@ static const uint8_t NAND_RECORD_BATT_V4 = 5;
 static const uint8_t NAND_RECORD_EVENT_V4 = 6;
 static const uint8_t NAND_RECORD_TELEM_V4 = 7;
 static const uint8_t NAND_RECORD_ATTITUDE_V4 = 8;
+static const uint8_t NAND_RECORD_IMU_WIDE_V4 = 9;
 
 struct __attribute__((packed)) NandLogHeaderV3 {
   char     magic[8];
@@ -150,6 +151,27 @@ struct __attribute__((packed)) NandImuRecordV4 {
 };
 static_assert(sizeof(NandImuRecordV4) == 28, "NandImuRecordV4 size mismatch");
 
+// Wide-gyro IMU record. The original centidegree int16 fields overflow above
+// +/-327.67 dps while the configured LSM9DS1 range is +/-2000 dps.
+struct __attribute__((packed)) NandImuWideRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  int16_t ax_cms2;
+  int16_t ay_cms2;
+  int16_t az_cms2;
+  int32_t gx_mdeg;
+  int32_t gy_mdeg;
+  int32_t gz_mdeg;
+  int16_t roll_cdeg;
+  int16_t pitch_cdeg;
+  int16_t yaw_cdeg;
+  uint8_t state;
+  uint8_t flags;
+};
+static_assert(sizeof(NandImuWideRecordV4) == 34, "NandImuWideRecordV4 size mismatch");
+
 struct __attribute__((packed)) NandBaroRecordV4 {
   uint8_t type;
   uint8_t size;
@@ -281,6 +303,12 @@ extern bool logOk;
 extern bool sdLogOk;
 extern bool nandLogOk;
 extern bool logsFinalized;
+extern uint32_t nandEventDroppedCount;
+extern uint32_t nandFlightRamBytes;
+extern uint32_t nandFlightRamDroppedRecords;
+extern uint32_t nandFlightCriticalRamBytes;
+extern uint32_t nandFlightCriticalDroppedRecords;
+extern uint32_t nandFlightNonCriticalDroppedRecords;
 
 int extractPrefixedIndex(const char *name, const char *prefix);
 void scanSdLogFiles();
@@ -297,6 +325,19 @@ void writeNandExportMetadata(File &dst, const NandLogMetadata &meta);
 void setupStorage();
 void processServiceModeIfRequested();
 void storageTask();
+void storagePrintStatus(Stream &out);
+void storageListNand(Stream &out);
+void storageListSd(Stream &out);
+bool storageInfoNand(uint32_t index, Stream &out);
+bool storageInfoSd(const char *name, Stream &out);
+bool storageReadNand(uint32_t index, uint32_t offset, uint32_t length, Stream &out);
+bool storageReadSd(const char *name, uint32_t offset, uint32_t length, Stream &out);
+bool storageMountSd();
+bool storageExportNandToSd(int32_t index, bool includeDetail,
+                           uint32_t &exportedCount, uint32_t &skippedCount,
+                           uint32_t &failedCount);
+bool storageEraseLogs(bool eraseNand, bool eraseSd,
+                      uint32_t &nandRemoved, uint32_t &sdRemoved);
 void finalizeLogFiles(NandCloseReason closeReason);
 void logNandImuBinary(uint32_t nowMs);
 void logNandBaroBinary(uint32_t nowMs);

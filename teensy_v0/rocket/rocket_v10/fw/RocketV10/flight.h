@@ -4,8 +4,9 @@
 
 void resetRelAltHistory(uint32_t nowMs, float relAlt);
 void clearLaunchArmGate();
+void updateArmSwitchTask(uint32_t nowMs);
 uint8_t currentLaunchStatus(uint16_t &waitSecondsOut);
 float currentBaroRelAltM();
 uint16_t buildHealthFlags();
 bool taskDue(uint32_t nowMs, uint32_t &lastRunMs, uint32_t periodMs);
-void updateFlightStateFromBaroSample(uint32_t nowMs, float currentAltM);
+void updateFlightStateTask(uint32_t nowMs);

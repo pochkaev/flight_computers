@@ -8,6 +8,8 @@
 #include "telemetry.h"
 #include "pyro.h"
 #include "ui.h"
+#include "settings.h"
+#include "timing.h"
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -19,6 +21,17 @@ void onLoraTxDone() {
   loraTxBusy = false;
 }
 
+void applyRocketRadioSettings() {
+  LoRa.idle();
+  loraTxBusy = false;
+  LoRa.setTxPower(rocketSettings.txPowerDbm);
+  LoRa.setSpreadingFactor(rocketSettings.loraSf);
+  LoRa.setSignalBandwidth(rocketSettings.loraBandwidthHz);
+  LoRa.setCodingRate4(rocketSettings.loraCr);
+  LoRa.disableCrc();
+  LoRa.onTxDone(onLoraTxDone);
+}
+
 static void setupLoRa() {
   LoRa.setPins(LORA_CS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
   if (!LoRa.begin(LORA_FREQUENCY_HZ)) {
@@ -27,9 +40,16 @@ static void setupLoRa() {
     return;
   }
   LoRa.setSPIFrequency(LORA_SPI_FREQ_HZ);
-  LoRa.onTxDone(onLoraTxDone);
+  applyRocketRadioSettings();
   loraOk = true;
   if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("LoRa: OK");
+}
+
+static void recoverLoRaTask(uint32_t nowMs) {
+  static uint32_t lastRetryMs = 0;
+  if (loraOk || (uint32_t)(nowMs - lastRetryMs) < 2000u) return;
+  lastRetryMs = nowMs;
+  setupLoRa();
 }
 
 static void printDebugStatus() {
@@ -209,6 +229,14 @@ static void printDebugStatus() {
   Serial.print((unsigned long)launchArmedMs);
   Serial.print(" launchStillMs=");
   Serial.print((unsigned long)launchArmStillSinceMs);
+  Serial.print(" armSafe=");
+  Serial.print(armSwitchSafe ? "1" : "0");
+  Serial.print(" safeSeen=");
+  Serial.print(armSafeObservedSinceBoot ? "1" : "0");
+  Serial.print(" launchCandidate=");
+  Serial.print(launchCandidateActive ? "1" : "0");
+  Serial.print(" touchdownCandidate=");
+  Serial.print(touchdownCandidateActive ? "1" : "0");
   Serial.print(" logFinal=");
   Serial.println(logsFinalized ? "1" : "0");
 }
@@ -232,6 +260,7 @@ void setup() {
   setLedMode(LED_MODE_BOOT);
   pinMode(BUZZER_PIN, OUTPUT);
   buzzerWrite(false);
+  pinMode(ARM_SWITCH_PIN, INPUT_PULLUP);
   setupPyroOutputs();
 #if BUTTON_ACTIVE_LOW
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -247,6 +276,7 @@ void setup() {
 #endif
   pinMode(VBAT_PIN, INPUT);
 
+  rocketSettingsInit();
   setupLoRa();
   setupStorage();
   processServiceModeIfRequested();
@@ -267,43 +297,79 @@ void loop() {
   static uint32_t lastNandImuLogMs = 0;
   static uint32_t lastImuUs = micros();
 
+  timingLoopBegin(micros());
   sampleGpsTask();
 
   uint32_t nowUs = micros();
   float dtImu = (nowUs - lastImuUs) * 1e-6f;
   if (dtImu <= 0.0f || dtImu > 0.05f) dtImu = 0.01f;
 
-  uint32_t nowMs = millis();
-  if (taskDue(nowMs, lastBattMs, BATT_UPDATE_MS)) {
+  uint32_t schedulerNowMs = millis();
+  updateArmSwitchTask(schedulerNowMs);
+  rocketSettingsTask();
+  recoverLoRaTask(schedulerNowMs);
+
+  bool batterySampled = false;
+  bool imuSampled = false;
+  bool baroSampled = false;
+
+  if (taskDue(schedulerNowMs, lastBattMs, BATT_UPDATE_MS)) {
     sampleBatteryTask();
-    logNandBatteryBinary(nowMs);
+    batterySampled = true;
   }
 
-  if (taskDue(nowMs, lastImuMs, IMU_UPDATE_MS)) {
+  if (taskDue(schedulerNowMs, lastImuMs, IMU_UPDATE_MS)) {
     lastImuUs = nowUs;
     sampleImuTask(dtImu);
-    if (taskDue(nowMs, lastNandImuLogMs, NAND_IMU_LOG_UPDATE_MS)) {
-      logNandImuBinary(nowMs);
-      logNandAttitudeBinary(nowMs);
-    }
+    imuSampled = true;
   }
 
-  if ((uint32_t)(nowMs - lastBaroMs) >= BARO_UPDATE_MS) {
-    float dtBaro = (nowMs - lastBaroMs) / 1000.0f;
+  if ((uint32_t)(schedulerNowMs - lastBaroMs) >= BARO_UPDATE_MS) {
+    float dtBaro = (schedulerNowMs - lastBaroMs) / 1000.0f;
     if (dtBaro <= 0.0f || dtBaro > 0.25f) dtBaro = BARO_UPDATE_MS / 1000.0f;
-    lastBaroMs = nowMs;
+    lastBaroMs = schedulerNowMs;
+    const uint32_t previousBaroSampleMs = lastBaroSampleMs;
     sampleBaroTask(dtBaro);
-    if (isBaroFresh()) logNandBaroBinary(nowMs);
+    baroSampled = lastBaroSampleMs != previousBaroSampleMs;
   }
 
-  logNandGpsBinary(nowMs);
+  // Capture time after all sensor transactions. Sensor tasks timestamp their
+  // own samples with millis(); using the older pre-I2C timestamp can
+  // underflow freshness checks and reject a genuinely new launch sample.
+  const uint32_t flightNowMs = millis();
+  updateFlightStateTask(flightNowMs);
+  // Output-off timing must be serviced before telemetry or synchronous storage.
+  updatePyroOutputs(flightNowMs);
+
+  // All recorder work is downstream of the flight kernel. A recorder delay
+  // can no longer prevent the current sensor sample from being evaluated.
+  if (batterySampled) {
+    logNandBatteryBinary(flightNowMs);
+  }
+  if (imuSampled &&
+      taskDue(flightNowMs, lastNandImuLogMs,
+              (flightState >= FS_DESCENT_BALLISTIC &&
+               flightState < FS_POST_FLIGHT_GROUND)
+                  ? NAND_DESCENT_IMU_LOG_UPDATE_MS
+                  : NAND_IMU_LOG_UPDATE_MS)) {
+    logNandImuBinary(lastImuSampleMs);
+#if NAND_ATTITUDE_LOG_ENABLE
+    logNandAttitudeBinary(lastImuSampleMs);
+#endif
+  }
+  if (baroSampled) {
+    logNandBaroBinary(lastBaroSampleMs);
+  }
+  logNandGpsBinary(flightNowMs);
 
   telemetryTask();
   storageTask();
   updateButtonTask();
-  updatePyroOutputs(nowMs);
+  // Service again in case a storage operation consumed a meaningful interval.
+  updatePyroOutputs(millis());
   serialDebugTask();
   updateLedModeFromHealth();
   updateStatusLed();
   updateBuzzer();
+  timingLoopEnd(micros());
 }
