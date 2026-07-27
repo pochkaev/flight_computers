@@ -11,5 +11,5 @@ bool isBaroFresh();
 bool isImuFresh();
 bool isGpsFresh();
 void sampleGpsTask();
-void sampleImuTask(float dtImu);
+bool sampleImuTask();
 void sampleBaroTask(float dtBaro);

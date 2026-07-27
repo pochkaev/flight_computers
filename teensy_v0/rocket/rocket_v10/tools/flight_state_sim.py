@@ -60,13 +60,19 @@ def check_recorder_policy() -> None:
     total = (160 + 416) * 1024
     reserve = 64 * 1024
     primary = total - reserve
-    ascent_bytes_s = 34 * 200 + 28 * 50 + 82 * 10 + 16 * 10 + 36 * 7 + 42
-    descent_bytes_s = 34 * 50 + 28 * 50 + 82 * 10 + 16 * 10 + 36 * 7 + 42
+    # New quaternion IMU records are 40 bytes instead of the old 34-byte
+    # Euler-only wide records. Calibration adds one 64-byte record per log.
+    ascent_bytes_s = (
+        40 * 200 + 20 * 25 + 28 * 50 + 82 * 10 + 16 * 10 + 36 * 7 + 42
+    )
+    descent_bytes_s = (
+        40 * 50 + 20 * 25 + 28 * 50 + 82 * 10 + 16 * 10 + 36 * 7 + 42
+    )
     critical_bytes_s = 28 * 50 + 82 * 10 + 16 * 10
     primary_after_10s = primary - ascent_bytes_s * 10
     descent_seconds = primary_after_10s / descent_bytes_s
     reserve_seconds = reserve / critical_bytes_s
-    assert descent_seconds > 90
+    assert descent_seconds > 75
     assert reserve_seconds > 25
     assert primary + reserve == total
 
@@ -87,9 +93,9 @@ def check_recorder_policy() -> None:
         else:
             dropped_noncritical += 1
 
-    while primary_used + 34 <= primary:
-        append(34, False)
-    append(34, False)
+    while primary_used + 40 <= primary:
+        append(40, False)
+    append(40, False)
     append(24, True)
     append(28, True)
     assert dropped_noncritical == 1

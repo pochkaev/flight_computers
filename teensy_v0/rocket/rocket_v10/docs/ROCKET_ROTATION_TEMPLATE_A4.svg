@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm"
+     viewBox="0 0 210 297">
+  <rect width="210" height="297" fill="white"/>
+
+  <style>
+    @page { size: A4; margin: 0; }
+    .title { font: 700 7px Arial, sans-serif; fill: #111827; }
+    .subtitle { font: 4px Arial, sans-serif; fill: #374151; }
+    .degree { font: 600 3.4px Arial, sans-serif; fill: #111827;
+              text-anchor: middle; }
+    .axis-label { font: 700 4px Arial, sans-serif; fill: #b91c1c;
+                  text-anchor: middle; }
+    .note { font: 3.5px Arial, sans-serif; fill: #1f2937; }
+    .small { font: 3px Arial, sans-serif; fill: #4b5563; }
+  </style>
+
+  <text x="105" y="16" class="title" text-anchor="middle">
+    ROCKET ROTATION CALIBRATION TEMPLATE
+  </text>
+  <text x="105" y="24" class="subtitle" text-anchor="middle">
+    15° increments · emphasized 90° cross · A4 · print at 100% / Actual Size
+  </text>
+
+  <!-- Center 105,145; outer diameter 164 mm -->
+  <circle cx="105" cy="145" r="82" fill="none" stroke="#111827"
+          stroke-width="0.8"/>
+  <circle cx="105" cy="145" r="75" fill="none" stroke="#9ca3af"
+          stroke-width="0.25"/>
+  <circle cx="105" cy="145" r="15" fill="none" stroke="#6b7280"
+          stroke-width="0.35" stroke-dasharray="1.5 1.5"/>
+
+  <!-- Fine 15-degree tick, reused clockwise around the circle. -->
+  <defs>
+    <line id="tick" x1="105" y1="63" x2="105" y2="69"
+          stroke="#111827" stroke-width="0.45"/>
+    <line id="tick30" x1="105" y1="63" x2="105" y2="72"
+          stroke="#111827" stroke-width="0.65"/>
+  </defs>
+  <use href="#tick" transform="rotate(15 105 145)"/>
+  <use href="#tick30" transform="rotate(30 105 145)"/>
+  <use href="#tick" transform="rotate(45 105 145)"/>
+  <use href="#tick30" transform="rotate(60 105 145)"/>
+  <use href="#tick" transform="rotate(75 105 145)"/>
+  <use href="#tick" transform="rotate(105 105 145)"/>
+  <use href="#tick30" transform="rotate(120 105 145)"/>
+  <use href="#tick" transform="rotate(135 105 145)"/>
+  <use href="#tick30" transform="rotate(150 105 145)"/>
+  <use href="#tick" transform="rotate(165 105 145)"/>
+  <use href="#tick" transform="rotate(195 105 145)"/>
+  <use href="#tick30" transform="rotate(210 105 145)"/>
+  <use href="#tick" transform="rotate(225 105 145)"/>
+  <use href="#tick30" transform="rotate(240 105 145)"/>
+  <use href="#tick" transform="rotate(255 105 145)"/>
+  <use href="#tick" transform="rotate(285 105 145)"/>
+  <use href="#tick30" transform="rotate(300 105 145)"/>
+  <use href="#tick" transform="rotate(315 105 145)"/>
+  <use href="#tick30" transform="rotate(330 105 145)"/>
+  <use href="#tick" transform="rotate(345 105 145)"/>
+
+  <!-- Strong cross: exact 0/90/180/270 degree references. -->
+  <line x1="105" y1="63" x2="105" y2="227" stroke="#b91c1c"
+        stroke-width="0.9"/>
+  <line x1="23" y1="145" x2="187" y2="145" stroke="#b91c1c"
+        stroke-width="0.9"/>
+  <circle cx="105" cy="145" r="2" fill="white" stroke="#b91c1c"
+          stroke-width="0.7"/>
+  <line x1="99" y1="145" x2="111" y2="145" stroke="#111827"
+        stroke-width="0.35"/>
+  <line x1="105" y1="139" x2="105" y2="151" stroke="#111827"
+        stroke-width="0.35"/>
+
+  <!-- Degree labels; positive direction is clockwise on this printed page. -->
+  <g>
+    <text x="105" y="59" class="axis-label">0° / ZERO</text>
+    <text x="105" y="59" class="degree" transform="rotate(15 105 145)">15°</text>
+    <text x="105" y="59" class="degree" transform="rotate(30 105 145)">30°</text>
+    <text x="105" y="59" class="degree" transform="rotate(45 105 145)">45°</text>
+    <text x="105" y="59" class="degree" transform="rotate(60 105 145)">60°</text>
+    <text x="105" y="59" class="degree" transform="rotate(75 105 145)">75°</text>
+    <text x="105" y="59" class="axis-label"
+          transform="rotate(90 105 145)">90°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(105 105 145)">105°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(120 105 145)">120°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(135 105 145)">135°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(150 105 145)">150°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(165 105 145)">165°</text>
+    <text x="105" y="59" class="axis-label"
+          transform="rotate(180 105 145)">180°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(195 105 145)">195°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(210 105 145)">210°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(225 105 145)">225°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(240 105 145)">240°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(255 105 145)">255°</text>
+    <text x="105" y="59" class="axis-label"
+          transform="rotate(270 105 145)">270°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(285 105 145)">285°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(300 105 145)">300°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(315 105 145)">315°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(330 105 145)">330°</text>
+    <text x="105" y="59" class="degree"
+          transform="rotate(345 105 145)">345°</text>
+  </g>
+
+  <path d="M 73 51 A 42 42 0 0 1 137 51" fill="none"
+        stroke="#2563eb" stroke-width="0.7" marker-end="url(#arrow)"/>
+  <defs>
+    <marker id="arrow" markerWidth="5" markerHeight="5" refX="4" refY="2.5"
+            orient="auto">
+      <path d="M0,0 L5,2.5 L0,5 Z" fill="#2563eb"/>
+    </marker>
+  </defs>
+  <text x="105" y="43" class="subtitle" text-anchor="middle">
+    CLOCKWISE POSITIVE ON THIS PAGE
+  </text>
+
+  <text x="18" y="240" class="note">
+    USE:
+  </text>
+  <text x="29" y="240" class="note">
+    Center the vertical rocket over the target. Align one fin, seam, or tape pointer with 0°.
+  </text>
+  <text x="18" y="247" class="note">
+    Run IMU BENCH ZERO, then rotate the same pointer to the required 15° mark or the red 90° line.
+  </text>
+  <text x="18" y="254" class="note">
+    Keep the rocket nose vertical. Firmware may report the opposite sign depending on right-hand direction.
+  </text>
+  <text x="18" y="263" class="small">
+    PRINT CHECK: select 100% / Actual Size. Disable Fit, Scale to Fit, and Shrink Oversized Pages.
+  </text>
+
+  <!-- Exact 100 mm scale verification. -->
+  <line x1="55" y1="278" x2="155" y2="278" stroke="#111827"
+        stroke-width="0.8"/>
+  <line x1="55" y1="274" x2="55" y2="282" stroke="#111827"
+        stroke-width="0.8"/>
+  <line x1="155" y1="274" x2="155" y2="282" stroke="#111827"
+        stroke-width="0.8"/>
+  <text x="105" y="274" class="note" text-anchor="middle">
+    THIS LINE MUST MEASURE EXACTLY 100 mm
+  </text>
+  <text x="105" y="289" class="small" text-anchor="middle">
+    Rocket V10 IMU bench aid · not a flight-critical measuring instrument
+  </text>
+</svg>

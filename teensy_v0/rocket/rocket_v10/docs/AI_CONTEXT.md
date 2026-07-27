@@ -139,9 +139,14 @@ New in `rocket_v10` already implemented:
   - the legacy SD CSV schema includes `mx`, `my`, `mz`, and approximate
     tilt-compensated `yaw`, but runtime SD CSV logging is disabled
   - NAND V4 full-state records include magnetometer and approximate yaw at `10 Hz`
-  - NAND V4 compact IMU records include accel/gyro/attitude at `200 Hz`
-  - the separate quaternion/attitude stream is disabled because the compact
-    IMU record already contains attitude
+  - accelerometer ODR is explicitly `238 Hz`; coherent accel/gyro data-ready
+    samples are accepted at up to the `200 Hz` scheduler rate
+  - NAND V4 type-10 IMU records include raw accel/gyro, measured `dt_us`,
+    quaternion, confidence, saturation, rejection, and sample-gap flags
+  - type-11 records capture the checksummed EEPROM calibration active when the
+    log opens
+  - the separate quaternion/attitude stream is disabled because type-10 IMU
+    records already contain the quaternion
   - NAND V4 now also writes barometer, GPS, battery, flight event, and telemetry snapshot stream records
   - NAND export is current-format only; legacy decode paths are intentionally not kept in production firmware
   - yaw is visualization-only and is not used by the state machine
@@ -242,14 +247,18 @@ NAND role:
 - detail CSV export is optional with `export_imu=0`
 - latest-only service export is available with `export_latest_only=1`
 - current firmware writes `RV10NLG` V4 typed records:
-  - type `1`: `50 Hz` full-state records
-  - type `2`: `200 Hz` compact IMU records
+  - type `1`: `10 Hz` full-state records
+  - type `2`: legacy compact IMU records
   - type `3`: barometer records
   - type `4`: GPS records
   - type `5`: battery records
   - type `6`: flight state/event records
   - type `7`: telemetry snapshot records
   - type `8`: quaternion attitude records
+  - type `9`: legacy wide-gyro IMU records
+  - type `10`: current wide-gyro quaternion IMU records
+  - type `11`: IMU calibration snapshot records
+  - type `12`: fresh raw magnetometer records at up to `25 Hz`
 - current firmware exports only the current V4 header/record combination
 - legacy NAND decode paths are intentionally not kept in production firmware; unsupported files are reported as `export_skipped`
 - NAND rotation is enabled:

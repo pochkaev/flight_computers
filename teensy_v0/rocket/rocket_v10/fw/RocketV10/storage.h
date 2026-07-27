@@ -14,6 +14,10 @@ static const uint8_t NAND_RECORD_EVENT_V4 = 6;
 static const uint8_t NAND_RECORD_TELEM_V4 = 7;
 static const uint8_t NAND_RECORD_ATTITUDE_V4 = 8;
 static const uint8_t NAND_RECORD_IMU_WIDE_V4 = 9;
+static const uint8_t NAND_RECORD_IMU_QUAT_V4 = 10;
+static const uint8_t NAND_RECORD_IMU_CAL_V4 = 11;
+static const uint8_t NAND_RECORD_MAG_V4 = 12;
+static const uint8_t NAND_RECORD_IMU_ALIGNMENT_V4 = 13;
 
 struct __attribute__((packed)) NandLogHeaderV3 {
   char     magic[8];
@@ -171,6 +175,76 @@ struct __attribute__((packed)) NandImuWideRecordV4 {
   uint8_t flags;
 };
 static_assert(sizeof(NandImuWideRecordV4) == 34, "NandImuWideRecordV4 size mismatch");
+
+// Calibrated quaternion + raw wide-range IMU record. This replaces the
+// Euler-only wide record for new logs while preserving the old record decoder.
+// dt_us stores the measured accepted-sample interval, not scheduler intent.
+struct __attribute__((packed)) NandImuQuatRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  uint16_t dt_us;
+  int16_t ax_cms2;
+  int16_t ay_cms2;
+  int16_t az_cms2;
+  int32_t gx_mdeg;
+  int32_t gy_mdeg;
+  int32_t gz_mdeg;
+  int16_t qw_i16;
+  int16_t qx_i16;
+  int16_t qy_i16;
+  int16_t qz_i16;
+  uint16_t quality_flags;
+  uint8_t confidence;
+  uint8_t state;
+};
+static_assert(sizeof(NandImuQuatRecordV4) == 40, "NandImuQuatRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandImuCalibrationRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  uint16_t calibration_version;
+  uint16_t valid_flags;
+  int32_t gyro_bias_mdps[3];
+  int16_t accel_bias_milli_mps2[3];
+  int32_t accel_scale_ppm[3];
+  int16_t mag_bias_centiuT[3];
+  int32_t mag_scale_ppm[3];
+  uint32_t calibration_checksum;
+};
+static_assert(sizeof(NandImuCalibrationRecordV4) == 64,
+              "NandImuCalibrationRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandImuAlignmentRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  uint16_t alignment_version;
+  uint16_t valid;
+  float sensor_to_airframe[4];
+  uint32_t alignment_checksum;
+};
+static_assert(sizeof(NandImuAlignmentRecordV4) == 32,
+              "NandImuAlignmentRecordV4 size mismatch");
+
+struct __attribute__((packed)) NandMagRecordV4 {
+  uint8_t type;
+  uint8_t size;
+  uint16_t sequence;
+  uint32_t ms;
+  uint16_t dt_us;
+  int16_t mx_centiuT;
+  int16_t my_centiuT;
+  int16_t mz_centiuT;
+  uint16_t quality_flags;
+  uint8_t state;
+  uint8_t flags;
+};
+static_assert(sizeof(NandMagRecordV4) == 20, "NandMagRecordV4 size mismatch");
 
 struct __attribute__((packed)) NandBaroRecordV4 {
   uint8_t type;
@@ -340,6 +414,7 @@ bool storageEraseLogs(bool eraseNand, bool eraseSd,
                       uint32_t &nandRemoved, uint32_t &sdRemoved);
 void finalizeLogFiles(NandCloseReason closeReason);
 void logNandImuBinary(uint32_t nowMs);
+void logNandMagBinary(uint32_t nowMs);
 void logNandBaroBinary(uint32_t nowMs);
 void logNandGpsBinary(uint32_t nowMs);
 void logNandBatteryBinary(uint32_t nowMs);

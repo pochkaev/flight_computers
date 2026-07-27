@@ -5,6 +5,8 @@ Firmware:
 - [RocketV10.ino](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/RocketV10.ino)
 - [config.h](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/config.h)
 - [FLIGHT_LOGGING.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/FLIGHT_LOGGING.md)
+- [IMU_QUATERNION.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/IMU_QUATERNION.md)
+- [calibration snapshots](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/calibration/README.md)
 - [PYRO.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/PYRO.md)
 - [AI_CONTEXT.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/AI_CONTEXT.md)
 - [NEXT_STEPS.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/NEXT_STEPS.md)
@@ -41,7 +43,7 @@ Compared with `rocket_v8`, `rocket_v10` currently adds:
   - blocked for `LAUNCH_POWERON_INHIBIT_MS = 60000 ms` after power-up
   - then requires `LAUNCH_PAD_STILL_ARM_MS = 30000 ms` of continuous stillness before launch detection is armed
   - movement before launch clears the launch-ready gate after `LAUNCH_ARM_MOTION_GRACE_MS`, so carrying the rocket after it is ready does not remain armed forever
-  - acceleration path: rising baro trend, `relAlt > LAUNCH_REL_ALT_M`, `velZ > LAUNCH_VEL_MPS`, and calibrated nose-axis acceleration `-az >= LAUNCH_AXIAL_ACCEL_G`
+  - acceleration path: rising baro trend, `relAlt > LAUNCH_REL_ALT_M`, `velZ > LAUNCH_VEL_MPS`, and raw nose-axis acceleration `-az >= LAUNCH_AXIAL_ACCEL_G`
   - baro path: rising baro trend, `relAlt > LAUNCH_BARO_REL_ALT_M`, and `velZ > LAUNCH_BARO_VEL_MPS`
   - obvious-flight path: `relAlt > LAUNCH_OBVIOUS_REL_ALT_M` and `velZ > LAUNCH_OBVIOUS_VEL_MPS`
   - held for `LAUNCH_CONFIRM_MS`
@@ -66,9 +68,12 @@ Compared with `rocket_v8`, `rocket_v10` currently adds:
   - tilt-compensated `yaw`
   - yaw is not used for flight-state decisions
 - high-rate onboard IMU logging:
-  - Step 3 high-rate IMU logging is complete
-  - IMU is sampled at `200 Hz`
-  - NAND stores compact IMU records at `200 Hz`
+  - accelerometer hardware rate is explicitly `238 Hz`
+  - coherent accel/gyro data-ready samples are accepted at up to `200 Hz`
+  - magnetometer freshness is tracked independently
+  - NAND stores quaternion IMU records at `200 Hz`
+  - records contain measured microsecond sample interval, raw accel/gyro,
+    quaternion, estimator confidence, saturation, rejection, and gap flags
   - LoRa telemetry rate is unchanged
   - V4 service export supports both full `_imu.csv` export and quick latest-only full-state export
 - versioned NAND metadata headers with record counts, finalization state, firmware version, rocket name, configured rates, IMU ranges, and estimator version
@@ -361,6 +366,15 @@ Connections:
 | `GND` | `GND` | Common ground |
 | `VCC` | module dependent | Check your specific GT-U7 breakout regulator and logic level |
 
+The same D0/D1 connector can be used as a `115200 8N1` maintenance console.
+Power off and disconnect the GPS, connect a 3.3 V TTL USB-UART adapter with
+TX/RX crossed and common ground, and keep physical SAFE active. Open the port
+at `9600 8N1`, send `SERVICE UART CONFIRM`, wait for
+`SERVICE SWITCH 115200`, then reopen it at `115200 8N1`. Holding the service
+button during SAFE power-on is an alternative. This mode supports settings,
+IMU calibration/bench checks, and NAND/SD commands. A normal reboot restores
+GPS operation. It does not replace native USB for firmware upload.
+
 Diagram:
 
 ```text
@@ -448,14 +462,12 @@ The firmware uses two different storage paths:
 - built-in SD card via `SD.begin(BUILTIN_SDCARD)`
 - optional QSPI NAND via `LittleFS_QPINAND`
 
-Reference implementation used in your working test project:
+QSPI NAND configuration:
 
-- [teensy41_nand_sd_test.ino](/Users/k_pochkaev/github/debug_projects/teensy41_nand_sd_test/teensy41_nand_sd_test.ino)
-- that sketch documents:
-  - Teensy 4.1 QSPI pads
-  - `CS1 = pin 51`
-  - `LittleFS_QPINAND`
-  - `W25N01G`
+- native Teensy 4.1 QSPI pads
+- `CS1 = pin 51`
+- `LittleFS_QPINAND`
+- `W25N01G`
 
 What the code actually does:
 
@@ -481,14 +493,18 @@ NAND format status:
 
 - current firmware writes `RV10NLG` header version `4`
 - current firmware writes typed V4 payload records:
-  - type `1`: `50 Hz` full-state records
-  - type `2`: `200 Hz` compact IMU records
+  - type `1`: `10 Hz` full-state records
+  - type `2`: legacy compact IMU records
   - type `3`: barometer records
   - type `4`: GPS records
   - type `5`: battery records
   - type `6`: flight state/event records, recovery classifications, and log-only dual-deploy events
   - type `7`: telemetry snapshot records
   - type `8`: quaternion attitude records
+  - type `9`: legacy wide-gyro IMU records
+  - type `10`: current wide-gyro quaternion IMU records
+  - type `11`: versioned IMU calibration snapshot
+  - type `12`: fresh raw magnetometer records at up to `25 Hz`
 - current export decodes only the current V4 header/record combination:
   - `header.version = 4`
   - `header.record_format = 4`
@@ -506,7 +522,8 @@ NAND full handling:
   - `NAND_MAX_LOG_FILES = 96`
   - `NAND_ROTATE_ENABLE = 1`
 - V4 writes `10 Hz` full-state, `50 Hz` barometer, and `200 Hz` compact IMU
-  records, with IMU reduced to `50 Hz` during descent states
+  records, plus up to `25 Hz` fresh magnetometer records, with IMU reduced to
+  `50 Hz` during descent states
 - the 16 MiB reserve protects NAND rotation; armed/in-flight capacity is
   primarily limited by the 576 KiB RAM recorder
 - rotation happens before opening a new log, not in the middle of an active flight log
@@ -631,17 +648,14 @@ Legacy policy:
 
 Post-flight tooling:
 
-- `visualizer/rocket_v10_flight_replay.py` reads exported V4 full-state CSV files, including metadata comment lines
-- if the sibling quaternion attitude CSV exists, for example `rocket_nand_0120_op1004_att.csv`, replay loads it automatically and uses quaternion interpolation for rocket attitude motion
-- if `_att.csv` is missing but the sibling high-rate IMU CSV exists, replay falls back to `_imu.csv` roll/pitch/yaw
-- use `--att-csv path/to/file_att.csv` to select a specific quaternion attitude export
-- use `--imu-csv path/to/file_imu.csv` to select a specific IMU export
-- use `--no-auto-imu` for full-state-only replay after a quick `export_imu=0` field export
-- `visualizer/rocket_v10_flight_report.py` also accepts V4 exports with metadata comment lines
+- `visualizer/rocket_v10_log_analyzer.py` is the single supported visualizer
+- it reads exported V4 full-state CSV files, including metadata comment lines
+- it automatically loads sibling `_imu`, `_baro`, `_gps`, `_batt`, `_event`, `_telem`, and `_att` exports
+- its 2D/3D replay uses the high-rate IMU roll/pitch/yaw stream for logged attitude and retains trajectory direction as a comparison
+- run `python3 visualizer/rocket_v10_log_analyzer.py /path/to/rocket_nand_NNNN_opNNNN.csv --open`
 
 Connection note:
 
-- use the same wiring that works in [teensy41_nand_sd_test.ino](/Users/k_pochkaev/github/debug_projects/teensy41_nand_sd_test/teensy41_nand_sd_test.ino)
 - this rocket firmware uses the same `LittleFS_QPINAND` class and initialization style
 - if the memory is not wired as native Teensy 4.1 QSPI NAND, `qspiNand.begin()` is expected to fail
 
@@ -769,7 +783,8 @@ pins, or bypass the physical SAFE workflow.
 Rocket retries LoRa initialization every two seconds if the radio is not found
 at boot. `SHOW` reports radio state and transmit sequence counters.
 
-Rocket log deletion is available over USB serial only while physical SAFE is
+Rocket log deletion is available over the USB or UART maintenance console
+only while physical SAFE is
 active and the state is `IDLE` or `PAD`. The final `CONFIRM` token is required:
 
 ```text

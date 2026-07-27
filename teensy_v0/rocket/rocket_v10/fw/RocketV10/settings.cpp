@@ -9,6 +9,7 @@
 
 #include "config.h"
 #include "button.h"
+#include "imu_service.h"
 #include "state.h"
 #include "storage.h"
 #include "timing.h"
@@ -101,6 +102,29 @@ static bool configurationUnlocked() {
   return physicalSafe && preflight;
 }
 
+bool rocketSettingsActivateUartService() {
+  if (rocketConsole.maintenanceActive()) return true;
+  if (!configurationUnlocked()) {
+    Serial.println("ERR LOCKED: physical SAFE and IDLE/PAD required");
+    return false;
+  }
+
+  // Notify both possible observers before changing the UART baud. The direct
+  // Serial1 line is useful when activation was requested through the GPS-port
+  // 9600-baud handshake; native USB remains useful during diagnostics.
+  Serial.println("UART SERVICE SWITCHING TO 115200");
+  Serial.flush();
+  GPS_SERIAL.println("SERVICE SWITCH 115200");
+  GPS_SERIAL.flush();
+  delay(25);
+  GPS_SERIAL.end();
+  GPS_SERIAL.begin(UART_SERVICE_BAUD, SERIAL_8N1);
+  rocketConsole.useMaintenancePort(GPS_SERIAL);
+  Serial.println("UART SERVICE ACTIVE GPS DISABLED UNTIL REBOOT");
+  Serial.println("OK SERVICE physical SAFE and IDLE/PAD required");
+  return true;
+}
+
 static bool requireUnlocked() {
   if (configurationUnlocked()) return true;
   Serial.println("ERR LOCKED: physical SAFE and IDLE/PAD required");
@@ -112,6 +136,10 @@ static void showSettings() {
   Serial.print("FW "); Serial.println(ROCKET_FW_VERSION);
   Serial.print("UPTIME_MS "); Serial.println(millis());
   Serial.print("CONFIG_UNLOCKED "); Serial.println(configurationUnlocked() ? 1 : 0);
+  Serial.print("CONSOLE ");
+  Serial.println(rocketConsole.maintenanceActive() ? "UART_SERVICE" : "USB");
+  Serial.print("GPS_ENABLED ");
+  Serial.println(rocketConsole.maintenanceActive() ? 0 : 1);
   Serial.print("FLIGHT_STATE "); Serial.println((uint8_t)flightState);
   Serial.print("LED_MODE "); Serial.println(ledModeName());
   Serial.print("LORA_OK "); Serial.println(loraOk ? 1 : 0);
@@ -136,6 +164,11 @@ static void showSettings() {
   Serial.print("LAUNCH_BARO_VEL_MPS "); Serial.println(rocketSettings.launchBaroVelMps, 1);
   Serial.print("APOGEE_MIN_ALT_M "); Serial.println(rocketSettings.apogeeMinAltM, 1);
   Serial.print("MAIN_ALT_M "); Serial.println(rocketSettings.mainAltM, 1);
+  Serial.print("IMU_CAL_FLAGS "); Serial.println(imuCalibration.validFlags);
+  Serial.print("IMU_CONFIDENCE "); Serial.println(imuRuntime.confidence, 3);
+  Serial.print("IMU_QUALITY_FLAGS "); Serial.println(imuRuntime.qualityFlags);
+  Serial.print("IMU_MISSED_SAMPLES "); Serial.println(imuRuntime.missedSampleCount);
+  Serial.print("IMU_SATURATION_SAMPLES "); Serial.println(imuRuntime.saturationSampleCount);
   Serial.print("LOOP_GAP_MAX_US "); Serial.println(runtimeTiming.loop_gap_max_us);
   Serial.print("LOOP_DEADLINE_MISSES "); Serial.println(runtimeTiming.loop_deadline_misses);
   Serial.print("LOOP_MAJOR_STALLS "); Serial.println(runtimeTiming.loop_major_stalls);
@@ -146,6 +179,8 @@ static void showSettings() {
 }
 
 static void showHelp() {
+  Serial.println("UART SERVICE: at GPS 9600 send SERVICE UART CONFIRM, then use 115200");
+  Serial.println("UART SERVICE: or SAFE + hold button during power-on");
   Serial.println("SHOW");
   Serial.println("SET LORA_SF 7");
   Serial.println("SET LORA_BW 125000");
@@ -170,6 +205,20 @@ static void showHelp() {
   Serial.println("STORAGE STATUS");
   Serial.println("TIMING");
   Serial.println("TIMING RESET");
+  Serial.println("IMU STATUS");
+  Serial.println("IMU CAL GYRO");
+  Serial.println("IMU CAL ACCEL START");
+  Serial.println("IMU CAL ACCEL ADD");
+  Serial.println("IMU CAL MAG START");
+  Serial.println("IMU CAL MAG STOP");
+  Serial.println("IMU CAL SAVE");
+  Serial.println("IMU CAL RESET CONFIRM");
+  Serial.println("IMU ALIGN STATUS");
+  Serial.println("IMU ALIGN CAPTURE CONFIRM");
+  Serial.println("IMU ALIGN RESET CONFIRM");
+  Serial.println("IMU STREAM START|STOP");
+  Serial.println("IMU BENCH ZERO");
+  Serial.println("IMU BENCH CHECK X|Y|Z degrees");
   Serial.println("NAND LIST");
   Serial.println("NAND INFO <index>");
   Serial.println("NAND READ <index> <offset> <length|0-to-end>");
@@ -515,6 +564,18 @@ static void handleLine(char *line) {
     } else {
       timingPrint(Serial);
     }
+  } else if (strcmp(command, "SERVICE") == 0) {
+    char *transport = strtok_r(nullptr, " \t", &save);
+    char *confirmation = strtok_r(nullptr, " \t", &save);
+    char *extra = strtok_r(nullptr, " \t", &save);
+    if (!transport || strcmp(transport, "UART") != 0 ||
+        !confirmation || strcmp(confirmation, "CONFIRM") != 0 || extra) {
+      Serial.println("ERR SERVICE syntax; use SERVICE UART CONFIRM");
+    } else {
+      rocketSettingsActivateUartService();
+    }
+  } else if (strcmp(command, "IMU") == 0) {
+    imuServiceHandleCommand(strtok_r(nullptr, " \t", &save), &save);
   } else if (strcmp(command, "SAVE") == 0) {
     if (!requireUnlocked()) return;
     saveSettings();

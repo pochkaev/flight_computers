@@ -1,11 +1,16 @@
 #pragma once
 
 #include <Arduino.h>
+#include "rocket_console.h"
+
+// Route existing command/status output through the selected console transport.
+// rocket_console.cpp does not include this macro and accesses native USB.
+#define Serial rocketConsole
 
 // Firmware identity
-#define ROCKET_FW_VERSION       "rv10.20260725l"
+#define ROCKET_FW_VERSION       "rv10.20260727b"
 #define NAND_RECORD_FORMAT_V4   4
-#define ATTITUDE_ESTIMATOR_VERSION 3
+#define ATTITUDE_ESTIMATOR_VERSION 7
 
 // LoRa RFM95
 #define LORA_FREQUENCY_HZ   915E6
@@ -22,6 +27,7 @@
 // GPS GT-U7
 #define GPS_SERIAL          Serial1
 #define GPS_BAUD            9600
+#define UART_SERVICE_BAUD   115200
 
 // External status LED
 // Recommended wiring: pin -> 330R -> LED anode, LED cathode -> GND
@@ -141,6 +147,7 @@
 #define SD_LOG_UPDATE_MS       200
 #define NAND_LOG_UPDATE_MS     100
 #define NAND_IMU_LOG_UPDATE_MS 5
+#define NAND_MAG_LOG_UPDATE_MS 40
 #define RECOVERY_SD_LOG_UPDATE_MS 2000
 #define RECOVERY_NAND_LOG_UPDATE_MS 2000
 #define LOG_FLUSH_MS        1000
@@ -187,14 +194,20 @@
 #define IMU_STALE_MS        1500
 #define GPS_STALE_MS        5000
 
-// Attitude estimator:
-// During boost the accelerometer is dominated by thrust, not gravity. Only use
-// accelerometer/magnetometer correction when measured acceleration is close to
-// 1g; otherwise coast on gyro integration.
-#define IMU_ACCEL_CORRECT_MIN_G 0.75f
-#define IMU_ACCEL_CORRECT_MAX_G 1.25f
-#define IMU_GYRO_ALPHA          0.98f
-#define IMU_MAG_YAW_ALPHA       0.995f
+// Phase-aware quaternion estimator. During boost the accelerometer is
+// dominated by thrust, not gravity, so attitude propagates from the gyro.
+// Accel/mag references are accepted only when both magnitude and innovation
+// checks pass. These values affect attitude diagnostics only; launch/recovery
+// continue to use the existing raw sensor evidence.
+#define IMU_ACCEL_CORRECT_MIN_G 0.82f
+#define IMU_ACCEL_CORRECT_MAX_G 1.18f
+#define IMU_ACCEL_INNOVATION_MAX_DEG 35.0f
+#define IMU_MAG_INNOVATION_MAX_DEG 45.0f
+#define IMU_ACCEL_CORRECTION_RATE 3.0f
+#define IMU_MAG_CORRECTION_RATE   0.7f
+#define IMU_STATIONARY_ACCEL_TOLERANCE_G 0.05f
+#define IMU_STATIONARY_GYRO_MAX_DPS 3.0f
+#define IMU_GYRO_BIAS_LEARNING_RATE 0.15f
 #define IMU_MAG_CORRECT_MIN_UT  10.0f
 #define IMU_MAG_CORRECT_MAX_UT  90.0f
 #define IMU_ACCEL_RANGE_G       16

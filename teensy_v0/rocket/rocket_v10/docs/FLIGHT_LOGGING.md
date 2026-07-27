@@ -1,7 +1,7 @@
 # Rocket v10 Flight Recorder and Storage Flow
 
 This document describes the recorder implemented in Rocket firmware
-`rv10.20260725l`. The firmware source remains authoritative:
+`rv10.20260726a`. The firmware source remains authoritative:
 
 - [config.h](../fw/RocketV10/config.h)
 - [storage.cpp](../fw/RocketV10/storage.cpp)
@@ -41,7 +41,13 @@ with `SD_RUNTIME_LOG_ENABLE=0` and `SD_CONFIG_LOAD_ENABLE=0`.
 
 ## EEPROM
 
-EEPROM contains one checksummed `RocketRuntimeSettings` structure:
+EEPROM contains two independent checksummed structures:
+
+- `RocketRuntimeSettings`
+- `ImuCalibrationData`
+- `ImuAlignmentData`
+
+`RocketRuntimeSettings` contains:
 
 - LoRa spreading factor, bandwidth, coding rate, and transmit power
 - flight, navigation, and status telemetry periods
@@ -58,6 +64,18 @@ current values to EEPROM. `DEFAULTS` loads defaults into RAM and requires
 version, size, and checksum; invalid EEPROM data is replaced by defaults at
 boot.
 
+`ImuCalibrationData` stores gyro bias, six-face accelerometer bias/scale, and
+assembled-rocket magnetometer bias/scale. It has its own magic, version, size,
+and checksum at a separate EEPROM address. IMU calibration is written only by
+`IMU CAL SAVE` or cleared by `IMU CAL RESET CONFIRM`.
+
+`ImuAlignmentData` stores the normalized fixed sensor-to-airframe mounting
+quaternion in another magic/version/size/checksum-protected EEPROM record.
+`IMU ALIGN CAPTURE CONFIRM` writes it immediately and
+`IMU ALIGN RESET CONFIRM` clears only alignment. When valid, recorded
+quaternions and Euler angles describe the rocket airframe (`+Z` toward the
+nose), not the raw IMU board.
+
 ## NAND record streams
 
 The NAND file uses typed binary V4 records. All rates below are nominal and
@@ -66,16 +84,22 @@ depend on the corresponding sensor producing a new sample.
 | Record | Nominal rate | Main contents |
 |---|---:|---|
 | Full state | 10 Hz | state, altitude, velocity, acceleration, attitude, GPS summary, battery, health and diagnostic flags |
-| Wide IMU | 200 Hz normally; 50 Hz during descent states | acceleration, 32-bit gyro, roll, pitch, yaw, state |
+| Quaternion IMU | Up to 200 Hz normally; 50 Hz during descent states | raw acceleration, 32-bit gyro, measured microsecond interval, quaternion, confidence and quality flags |
+| Magnetometer | Up to 25 Hz when fresh | raw magnetic axes, measured interval and estimator quality flags |
 | Barometer | 50 Hz | absolute/relative altitude, vertical velocity, pressure, temperature, diagnostics, state |
 | Battery | 10 Hz | filtered/raw voltage, ADC pin voltage, pack classification, warning/critical flags |
 | GPS | 1 Hz by default | position, absolute/relative altitude, speed, fix quality/age, parser counters, baro-GPS difference |
 | Telemetry audit | When each packet is transmitted | packet type and sequence counters, state, health, RSSI, battery |
 | Event | Immediately through a deferred event queue | state changes, recovery classifications, pyro requests/output changes, close reason and flight evidence |
 
-The separate 200 Hz quaternion/attitude stream is disabled with
-`NAND_ATTITUDE_LOG_ENABLE=0`. The wide IMU stream already records Euler
-attitude, and disabling the duplicate stream preserves flight-buffer capacity.
+The separate attitude stream remains disabled with
+`NAND_ATTITUDE_LOG_ENABLE=0`. Current type-10 IMU records contain the
+quaternion directly, and the exporter derives roll/pitch/yaw for compatibility.
+One type-11 record captures the sensor calibration active when the log opens.
+One type-13 record captures the sensor-to-airframe alignment quaternion,
+validity, version, and checksum. Full exports place both metadata records at
+the top of the IMU CSV, and every IMU row includes an `airframe_aligned`
+quality column.
 
 Default telemetry audit cadence is:
 
@@ -149,6 +173,14 @@ The prelaunch area is bounded rather than an infinite armed-time log. When its
 64 KiB limit is reached, the accumulated prelaunch block is discarded and a
 new recent block begins. This prevents a long armed wait from consuming the
 flight buffer.
+
+With current 40-byte quaternion IMU records and 20-byte magnetometer records,
+the deterministic recorder model allows approximately 10 seconds at the
+normal 200 Hz profile followed by about 80 seconds at the 50 Hz descent
+profile before the primary area fills.
+The critical reserve then retains roughly 28 additional seconds of
+full-state/barometer/battery evidence. Actual duration depends on state
+timing, telemetry records, events, and sensor availability.
 
 Because in-flight data is intentionally held in volatile RAM, complete power
 loss before finalization loses the buffered flight portion. The NAND header and
@@ -226,6 +258,30 @@ SAVE
 DEFAULTS
 FLIGHT RESET CONFIRM
 ```
+
+IMU calibration and quaternion acceptance:
+
+```text
+IMU STATUS
+IMU CAL GYRO
+IMU CAL ACCEL START
+IMU CAL ACCEL ADD
+IMU CAL MAG START
+IMU CAL MAG STOP
+IMU CAL SAVE
+IMU CAL RESET CONFIRM
+IMU ALIGN STATUS
+IMU ALIGN CAPTURE CONFIRM
+IMU ALIGN RESET CONFIRM
+IMU STREAM START
+IMU STREAM STOP
+IMU BENCH ZERO
+IMU BENCH CHECK X|Y|Z <degrees>
+```
+
+These commands are SAFE/preflight-only. See
+[IMU_QUATERNION.md](IMU_QUATERNION.md) for the physical calibration and
+known-angle acceptance procedure.
 
 NAND and SD service:
 

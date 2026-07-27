@@ -1,0 +1,72 @@
+{
+  "schema": "rocket-v10-imu-calibration-snapshot-v1",
+  "captured_date": "2026-07-27",
+  "firmware": "rv10.20260727b",
+  "source": "Live IMU STATUS output from the installed Rocket V10 flight computer",
+  "axis_order": [
+    "x",
+    "y",
+    "z"
+  ],
+  "eeprom_is_authoritative": true,
+  "imu_calibration": {
+    "record_version": 1,
+    "valid_flags": 7,
+    "gyro_bias_dps": [
+      -2.08012,
+      -0.67445,
+      0.34083
+    ],
+    "accelerometer_bias_mps2": [
+      -0.16326,
+      -0.08740,
+      0.03098
+    ],
+    "accelerometer_scale": [
+      1.012933,
+      1.004670,
+      1.001459
+    ],
+    "magnetometer_bias_uT": [
+      4.1947,
+      29.7574,
+      -66.4791
+    ],
+    "magnetometer_scale": [
+      0.971873,
+      0.970958,
+      1.062532
+    ],
+    "magnetometer_die_to_ag_frame": {
+      "x": "-x",
+      "y": "-y",
+      "z": "z"
+    }
+  },
+  "airframe_alignment": {
+    "record_version": 2,
+    "valid": true,
+    "quaternion_order": [
+      "w",
+      "x",
+      "y",
+      "z"
+    ],
+    "sensor_to_airframe_quaternion": [
+      0.0012076,
+      0.9710094,
+      0.2386367,
+      0.0138528
+    ],
+    "airframe_definition": {
+      "positive_z": "rocket nose",
+      "transverse_reference": "reference fin at template zero"
+    }
+  },
+  "notes": [
+    "Values are stored in this flight computer's EEPROM with firmware-generated checksums.",
+    "Repository values use the precision printed by IMU STATUS and are a recovery and audit reference.",
+    "Do not apply these values to another IMU or after changing the IMU mounting position.",
+    "Recalibrate after replacing or moving the IMU; repeat airframe alignment after any mounting change."
+  ]
+}

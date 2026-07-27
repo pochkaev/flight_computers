@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "config.h"
+#include "imu_service.h"
 #include "ui.h"
 #include "settings.h"
 #include "timing.h"
@@ -26,6 +27,34 @@ static int16_t angleRadToCdeg(float angleRad) {
   while (angleRad > PI) angleRad -= 2.0f * PI;
   while (angleRad < -PI) angleRad += 2.0f * PI;
   return scaledInt16Saturated(angleRad, 5729.57795f);
+}
+
+static void quaternionI16ToEulerDegrees(int16_t qwRaw, int16_t qxRaw,
+                                       int16_t qyRaw, int16_t qzRaw,
+                                       float &rollDeg, float &pitchDeg,
+                                       float &yawDeg) {
+  float qw = qwRaw / 32767.0f;
+  float qx = qxRaw / 32767.0f;
+  float qy = qyRaw / 32767.0f;
+  float qz = qzRaw / 32767.0f;
+  const float norm = sqrtf(qw * qw + qx * qx + qy * qy + qz * qz);
+  if (!isfinite(norm) || norm < 1.0e-6f) {
+    rollDeg = pitchDeg = yawDeg = 0.0f;
+    return;
+  }
+  qw /= norm;
+  qx /= norm;
+  qy /= norm;
+  qz /= norm;
+  const float sinr = 2.0f * (qw * qx + qy * qz);
+  const float cosr = 1.0f - 2.0f * (qx * qx + qy * qy);
+  const float sinp = max(-1.0f, min(1.0f, 2.0f * (qw * qy - qz * qx)));
+  const float siny = 2.0f * (qw * qz + qx * qy);
+  const float cosy = 1.0f - 2.0f * (qy * qy + qz * qz);
+  rollDeg = atan2f(sinr, cosr) * 57.2957795f;
+  pitchDeg = asinf(sinp) * 57.2957795f;
+  yawDeg = atan2f(siny, cosy) * 57.2957795f;
+  if (yawDeg < 0.0f) yawDeg += 360.0f;
 }
 
 #define HAS_LITTLEFS_QPINAND 1
@@ -804,6 +833,54 @@ static bool appendNandRecord(const void *record, uint16_t size) {
 #endif
 }
 
+static bool appendImuCalibrationRecord() {
+#if HAS_LITTLEFS_QPINAND
+  NandImuCalibrationRecordV4 rec = {};
+  rec.type = NAND_RECORD_IMU_CAL_V4;
+  rec.size = sizeof(rec);
+  rec.sequence = nandRecordSequence++;
+  rec.ms = millis();
+  rec.calibration_version = imuCalibration.version;
+  rec.valid_flags = imuCalibration.validFlags;
+  for (uint8_t axis = 0; axis < 3; ++axis) {
+    rec.gyro_bias_mdps[axis] =
+        (int32_t)lroundf(imuCalibration.gyroBiasDps[axis] * 1000.0f);
+    rec.accel_bias_milli_mps2[axis] =
+        scaledInt16Saturated(imuCalibration.accelBiasMps2[axis], 1000.0f);
+    rec.accel_scale_ppm[axis] =
+        (int32_t)lroundf(imuCalibration.accelScale[axis] * 1000000.0f);
+    rec.mag_bias_centiuT[axis] =
+        scaledInt16Saturated(imuCalibration.magBiasUt[axis], 100.0f);
+    rec.mag_scale_ppm[axis] =
+        (int32_t)lroundf(imuCalibration.magScale[axis] * 1000000.0f);
+  }
+  rec.calibration_checksum = imuCalibration.checksum;
+  return appendNandRecord(&rec, sizeof(rec));
+#else
+  return false;
+#endif
+}
+
+static bool appendImuAlignmentRecord() {
+#if HAS_LITTLEFS_QPINAND
+  NandImuAlignmentRecordV4 rec = {};
+  rec.type = NAND_RECORD_IMU_ALIGNMENT_V4;
+  rec.size = sizeof(rec);
+  rec.sequence = nandRecordSequence++;
+  rec.ms = millis();
+  rec.alignment_version = imuAlignment.version;
+  rec.valid = imuAlignment.valid;
+  for (uint8_t component = 0; component < 4; ++component) {
+    rec.sensor_to_airframe[component] =
+        imuAlignment.sensorToAirframe[component];
+  }
+  rec.alignment_checksum = imuAlignment.checksum;
+  return appendNandRecord(&rec, sizeof(rec));
+#else
+  return false;
+#endif
+}
+
 void finalizeLogFiles(NandCloseReason closeReason) {
   if (logsFinalized) return;
 
@@ -906,6 +983,15 @@ static void ensureLogOpen() {
         nandLogFile.close();
       } else {
         openedAny = true;
+        if (!appendImuCalibrationRecord()) {
+          nandLogOk = false;
+          nandLogFile.close();
+          openedAny = false;
+        } else if (!appendImuAlignmentRecord()) {
+          nandLogOk = false;
+          nandLogFile.close();
+          openedAny = false;
+        }
       }
     } else {
       nandLogOk = false;
@@ -1036,27 +1122,58 @@ void logNandImuBinary(uint32_t nowMs) {
   if (flightState == FS_LANDED || flightState == FS_ABORT) return;
   ensureLogOpen();
   if (nandLogFile || flightRamCaptureActive()) {
-    NandImuWideRecordV4 rec = {};
-    rec.type = NAND_RECORD_IMU_WIDE_V4;
+    NandImuQuatRecordV4 rec = {};
+    rec.type = NAND_RECORD_IMU_QUAT_V4;
     rec.size = sizeof(rec);
     rec.sequence = nandRecordSequence++;
     rec.ms = nowMs;
+    rec.dt_us = imuRuntime.dtUs;
     rec.ax_cms2 = scaledInt16Saturated(last_ax, 100.0f);
     rec.ay_cms2 = scaledInt16Saturated(last_ay, 100.0f);
     rec.az_cms2 = scaledInt16Saturated(last_az, 100.0f);
     rec.gx_mdeg = (int32_t)lroundf(last_gx * 1000.0f);
     rec.gy_mdeg = (int32_t)lroundf(last_gy * 1000.0f);
     rec.gz_mdeg = (int32_t)lroundf(last_gz * 1000.0f);
-    rec.roll_cdeg = angleRadToCdeg(roll);
-    rec.pitch_cdeg = angleRadToCdeg(pitch);
-    rec.yaw_cdeg = angleRadToCdeg(yaw);
+    rec.qw_i16 = quantizeUnitI16(attitudeQw);
+    rec.qx_i16 = quantizeUnitI16(attitudeQx);
+    rec.qy_i16 = quantizeUnitI16(attitudeQy);
+    rec.qz_i16 = quantizeUnitI16(attitudeQz);
+    rec.quality_flags = imuRuntime.qualityFlags;
+    rec.confidence = (uint8_t)min(255, max(0,
+        (int)lroundf(imuRuntime.confidence * 255.0f)));
     rec.state = (uint8_t)flightState;
-    rec.flags = 0;
     if (!appendNandRecord(&rec, sizeof(rec))) {
       nandLogOk = false;
       if (nandLogFile) nandLogFile.close();
     }
   }
+#endif
+  logOk = sdLogOk || nandLogOk || logsFinalized;
+}
+
+void logNandMagBinary(uint32_t nowMs) {
+#if HAS_LITTLEFS_QPINAND
+  if (flightState == FS_LANDED || flightState == FS_ABORT) return;
+  ensureLogOpen();
+  if (nandLogFile || flightRamCaptureActive()) {
+    NandMagRecordV4 rec = {};
+    rec.type = NAND_RECORD_MAG_V4;
+    rec.size = sizeof(rec);
+    rec.sequence = nandRecordSequence++;
+    rec.ms = nowMs;
+    rec.dt_us = imuRuntime.magDtUs;
+    rec.mx_centiuT = scaledInt16Saturated(last_mx, 100.0f);
+    rec.my_centiuT = scaledInt16Saturated(last_my, 100.0f);
+    rec.mz_centiuT = scaledInt16Saturated(last_mz, 100.0f);
+    rec.quality_flags = imuRuntime.qualityFlags;
+    rec.state = (uint8_t)flightState;
+    if (!appendNandRecord(&rec, sizeof(rec))) {
+      nandLogOk = false;
+      if (nandLogFile) nandLogFile.close();
+    }
+  }
+#else
+  (void)nowMs;
 #endif
   logOk = sdLogOk || nandLogOk || logsFinalized;
 }
@@ -1472,6 +1589,9 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
   char attitudeCsvName[56];
   snprintf(attitudeCsvName, sizeof(attitudeCsvName), "rocket_nand_%04lu_op%lu_att.csv",
            (unsigned long)meta.flight_index, (unsigned long)operationId);
+  char magCsvName[56];
+  snprintf(magCsvName, sizeof(magCsvName), "rocket_nand_%04lu_op%lu_mag.csv",
+           (unsigned long)meta.flight_index, (unsigned long)operationId);
   SD.remove(csvName);
   SD.remove(imuCsvName);
   SD.remove(baroCsvName);
@@ -1480,6 +1600,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
   SD.remove(eventCsvName);
   SD.remove(telemCsvName);
   SD.remove(attitudeCsvName);
+  SD.remove(magCsvName);
   File dst = SD.open(csvName, FILE_WRITE);
   if (!dst) {
     if (SERIAL_DEBUG_LEVEL >= 1) {
@@ -1496,6 +1617,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
   File eventDst;
   File telemDst;
   File attitudeDst;
+  File magDst;
   if (exportImu) {
     imuDst = SD.open(imuCsvName, FILE_WRITE);
     baroDst = SD.open(baroCsvName, FILE_WRITE);
@@ -1504,7 +1626,9 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
     eventDst = SD.open(eventCsvName, FILE_WRITE);
     telemDst = SD.open(telemCsvName, FILE_WRITE);
     attitudeDst = SD.open(attitudeCsvName, FILE_WRITE);
-    if (!imuDst || !baroDst || !gpsDst || !battDst || !eventDst || !telemDst || !attitudeDst) {
+    magDst = SD.open(magCsvName, FILE_WRITE);
+    if (!imuDst || !baroDst || !gpsDst || !battDst || !eventDst ||
+        !telemDst || !attitudeDst || !magDst) {
       if (SERIAL_DEBUG_LEVEL >= 1) {
         Serial.println("NAND export: open detail csv failed");
       }
@@ -1515,6 +1639,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
       if (eventDst) eventDst.close();
       if (telemDst) telemDst.close();
       if (attitudeDst) attitudeDst.close();
+      if (magDst) magDst.close();
       dst.close();
       src.close();
       return NAND_EXPORT_FAILED;
@@ -1524,7 +1649,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
   dst.println("ms,state,flags,health,diag_flags,alt_m,rel_alt_m,vel_mps,temp_c,pres_pa,ax,ay,az,gx,gy,gz,mx,my,mz,roll,pitch,yaw,gps_fix,sats,lat,lon,gps_alt_m,gps_rel_alt_m,baro_gps_delta_m,gps_speed_mps,batt_v,pack");
   if (imuDst) {
     writeNandExportMetadata(imuDst, meta);
-    imuDst.println("ms,seq,state,ax,ay,az,gx,gy,gz,roll,pitch,yaw");
+    imuDst.println("ms,seq,state,ax,ay,az,gx,gy,gz,roll,pitch,yaw,dt_us,qw,qx,qy,qz,confidence,quality_flags,accel_corr,mag_corr,gyro_only,accel_sat,gyro_sat,sample_gap,accel_rejected,mag_rejected,stationary,mag_fresh,airframe_aligned");
   }
   if (baroDst) {
     writeNandExportMetadata(baroDst, meta);
@@ -1550,6 +1675,10 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
     writeNandExportMetadata(attitudeDst, meta);
     attitudeDst.println("ms,seq,state,qw,qx,qy,qz,roll,pitch,yaw,diag_flags,flags,accel_corr,mag_corr,gyro_only");
   }
+  if (magDst) {
+    writeNandExportMetadata(magDst, meta);
+    magDst.println("ms,seq,state,dt_us,mx,my,mz,field_ut,quality_flags,mag_fresh,mag_rejected");
+  }
   dst.flush();
   if (imuDst) imuDst.flush();
   if (baroDst) baroDst.flush();
@@ -1558,6 +1687,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
   if (eventDst) eventDst.flush();
   if (telemDst) telemDst.flush();
   if (attitudeDst) attitudeDst.flush();
+  if (magDst) magDst.flush();
   bool wroteFull = false;
   bool wroteImu = false;
 
@@ -1570,6 +1700,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
   if (eventDst) eventDst.close(); \
   if (telemDst) telemDst.close(); \
   if (attitudeDst) attitudeDst.close(); \
+  if (magDst) magDst.close(); \
 } while (0)
 
   uint64_t offset = meta.header_size;
@@ -1582,6 +1713,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
   uint32_t eventRows = 0;
   uint32_t telemRows = 0;
   uint32_t attitudeRows = 0;
+  uint32_t magRows = 0;
   uint32_t badTypeRows = 0;
   uint32_t implausibleRows = 0;
   while (offset + 2 <= fileSize && recordsRead < meta.record_count) {
@@ -1757,6 +1889,156 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
       }
       if (exportImu) wroteImu = true;
       imuRows++;
+    } else if (type == NAND_RECORD_IMU_QUAT_V4 &&
+               size == sizeof(NandImuQuatRecordV4)) {
+      NandImuQuatRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: quaternion imu record read failed");
+        CLOSE_DETAIL_EXPORT_FILES();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (imuDst) {
+        float rollDeg = 0.0f;
+        float pitchDeg = 0.0f;
+        float yawDeg = 0.0f;
+        quaternionI16ToEulerDegrees(rec.qw_i16, rec.qx_i16,
+                                    rec.qy_i16, rec.qz_i16,
+                                    rollDeg, pitchDeg, yawDeg);
+        const uint16_t flags = rec.quality_flags;
+        char line[544];
+        snprintf(line, sizeof(line),
+                 "%lu,%u,%u,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%u,%.7f,%.7f,%.7f,%.7f,%.4f,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 (unsigned int)rec.state,
+                 rec.ax_cms2 / 100.0f,
+                 rec.ay_cms2 / 100.0f,
+                 rec.az_cms2 / 100.0f,
+                 rec.gx_mdeg / 1000.0f,
+                 rec.gy_mdeg / 1000.0f,
+                 rec.gz_mdeg / 1000.0f,
+                 rollDeg,
+                 pitchDeg,
+                 yawDeg,
+                 (unsigned int)rec.dt_us,
+                 rec.qw_i16 / 32767.0f,
+                 rec.qx_i16 / 32767.0f,
+                 rec.qy_i16 / 32767.0f,
+                 rec.qz_i16 / 32767.0f,
+                 rec.confidence / 255.0f,
+                 (unsigned int)flags,
+                 (flags & IMU_QUALITY_ACCEL_CORRECTION) ? 1u : 0u,
+                 (flags & IMU_QUALITY_MAG_CORRECTION) ? 1u : 0u,
+                 (flags & IMU_QUALITY_GYRO_ONLY) ? 1u : 0u,
+                 (flags & IMU_QUALITY_ACCEL_SATURATED) ? 1u : 0u,
+                 (flags & IMU_QUALITY_GYRO_SATURATED) ? 1u : 0u,
+                 (flags & IMU_QUALITY_SAMPLE_GAP) ? 1u : 0u,
+                 (flags & IMU_QUALITY_ACCEL_REJECTED) ? 1u : 0u,
+                 (flags & IMU_QUALITY_MAG_REJECTED) ? 1u : 0u,
+                 (flags & IMU_QUALITY_STATIONARY) ? 1u : 0u,
+                 (flags & IMU_QUALITY_MAG_FRESH) ? 1u : 0u,
+                 (flags & IMU_QUALITY_AIRFRAME_ALIGNED) ? 1u : 0u);
+        if (!imuDst.println(line)) {
+          CLOSE_DETAIL_EXPORT_FILES();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      if (exportImu) wroteImu = true;
+      imuRows++;
+    } else if (type == NAND_RECORD_IMU_CAL_V4 &&
+               size == sizeof(NandImuCalibrationRecordV4)) {
+      NandImuCalibrationRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: imu calibration record read failed");
+        CLOSE_DETAIL_EXPORT_FILES();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (imuDst) {
+        imuDst.print("# imu_cal_version=");
+        imuDst.println(rec.calibration_version);
+        imuDst.print("# imu_cal_flags=");
+        imuDst.println(rec.valid_flags);
+        imuDst.print("# imu_gyro_bias_dps=");
+        imuDst.print(rec.gyro_bias_mdps[0] / 1000.0f, 5); imuDst.print(",");
+        imuDst.print(rec.gyro_bias_mdps[1] / 1000.0f, 5); imuDst.print(",");
+        imuDst.println(rec.gyro_bias_mdps[2] / 1000.0f, 5);
+        imuDst.print("# imu_accel_bias_mps2=");
+        imuDst.print(rec.accel_bias_milli_mps2[0] / 1000.0f, 5); imuDst.print(",");
+        imuDst.print(rec.accel_bias_milli_mps2[1] / 1000.0f, 5); imuDst.print(",");
+        imuDst.println(rec.accel_bias_milli_mps2[2] / 1000.0f, 5);
+        imuDst.print("# imu_accel_scale=");
+        imuDst.print(rec.accel_scale_ppm[0] / 1000000.0f, 6); imuDst.print(",");
+        imuDst.print(rec.accel_scale_ppm[1] / 1000000.0f, 6); imuDst.print(",");
+        imuDst.println(rec.accel_scale_ppm[2] / 1000000.0f, 6);
+        imuDst.print("# imu_mag_bias_ut=");
+        imuDst.print(rec.mag_bias_centiuT[0] / 100.0f, 4); imuDst.print(",");
+        imuDst.print(rec.mag_bias_centiuT[1] / 100.0f, 4); imuDst.print(",");
+        imuDst.println(rec.mag_bias_centiuT[2] / 100.0f, 4);
+        imuDst.print("# imu_mag_scale=");
+        imuDst.print(rec.mag_scale_ppm[0] / 1000000.0f, 6); imuDst.print(",");
+        imuDst.print(rec.mag_scale_ppm[1] / 1000000.0f, 6); imuDst.print(",");
+        imuDst.println(rec.mag_scale_ppm[2] / 1000000.0f, 6);
+        imuDst.print("# imu_cal_checksum=");
+        imuDst.println(rec.calibration_checksum);
+      }
+    } else if (type == NAND_RECORD_IMU_ALIGNMENT_V4 &&
+               size == sizeof(NandImuAlignmentRecordV4)) {
+      NandImuAlignmentRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1)
+          Serial.println("NAND export: imu alignment record read failed");
+        CLOSE_DETAIL_EXPORT_FILES();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (imuDst) {
+        imuDst.print("# imu_alignment_version=");
+        imuDst.println(rec.alignment_version);
+        imuDst.print("# imu_alignment_valid=");
+        imuDst.println(rec.valid);
+        imuDst.print("# imu_sensor_to_airframe=");
+        imuDst.print(rec.sensor_to_airframe[0], 7); imuDst.print(",");
+        imuDst.print(rec.sensor_to_airframe[1], 7); imuDst.print(",");
+        imuDst.print(rec.sensor_to_airframe[2], 7); imuDst.print(",");
+        imuDst.println(rec.sensor_to_airframe[3], 7);
+        imuDst.print("# imu_alignment_checksum=");
+        imuDst.println(rec.alignment_checksum);
+      }
+    } else if (type == NAND_RECORD_MAG_V4 &&
+               size == sizeof(NandMagRecordV4)) {
+      NandMagRecordV4 rec = {};
+      if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
+        if (SERIAL_DEBUG_LEVEL >= 1) Serial.println("NAND export: magnetometer record read failed");
+        CLOSE_DETAIL_EXPORT_FILES();
+        src.close();
+        return NAND_EXPORT_FAILED;
+      }
+      if (magDst) {
+        const float mx = rec.mx_centiuT / 100.0f;
+        const float my = rec.my_centiuT / 100.0f;
+        const float mz = rec.mz_centiuT / 100.0f;
+        const float field = sqrtf(mx * mx + my * my + mz * mz);
+        char line[256];
+        snprintf(line, sizeof(line),
+                 "%lu,%u,%u,%u,%.2f,%.2f,%.2f,%.2f,%u,%u,%u",
+                 (unsigned long)rec.ms,
+                 (unsigned int)rec.sequence,
+                 (unsigned int)rec.state,
+                 (unsigned int)rec.dt_us,
+                 mx, my, mz, field,
+                 (unsigned int)rec.quality_flags,
+                 (rec.quality_flags & IMU_QUALITY_MAG_FRESH) ? 1u : 0u,
+                 (rec.quality_flags & IMU_QUALITY_MAG_REJECTED) ? 1u : 0u);
+        if (!magDst.println(line)) {
+          CLOSE_DETAIL_EXPORT_FILES();
+          src.close();
+          return NAND_EXPORT_FAILED;
+        }
+      }
+      magRows++;
     } else if (type == NAND_RECORD_BARO_V4 && size == sizeof(NandBaroRecordV4)) {
       NandBaroRecordV4 rec = {};
       if (src.read((uint8_t *)&rec, sizeof(rec)) != (int)sizeof(rec)) {
@@ -1769,6 +2051,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
         if (eventDst) eventDst.close();
         if (telemDst) telemDst.close();
         if (attitudeDst) attitudeDst.close();
+        if (magDst) magDst.close();
         src.close();
         return NAND_EXPORT_FAILED;
       }
@@ -1962,6 +2245,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
           if (eventDst) eventDst.close();
           telemDst.close();
           if (attitudeDst) attitudeDst.close();
+          if (magDst) magDst.close();
           src.close();
           return NAND_EXPORT_FAILED;
         }
@@ -1979,6 +2263,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
         if (eventDst) eventDst.close();
         if (telemDst) telemDst.close();
         if (attitudeDst) attitudeDst.close();
+        if (magDst) magDst.close();
         src.close();
         return NAND_EXPORT_FAILED;
       }
@@ -2012,6 +2297,7 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
           if (eventDst) eventDst.close();
           if (telemDst) telemDst.close();
           attitudeDst.close();
+          if (magDst) magDst.close();
           src.close();
           return NAND_EXPORT_FAILED;
         }
@@ -2041,6 +2327,8 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
       Serial.print((unsigned long)imuRows);
       Serial.print(" att=");
       Serial.print((unsigned long)attitudeRows);
+      Serial.print(" mag=");
+      Serial.print((unsigned long)magRows);
       Serial.print(" bad=");
       Serial.print((unsigned long)badTypeRows);
       Serial.print(" implausible=");
@@ -2078,6 +2366,10 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
     attitudeDst.flush();
     attitudeDst.close();
   }
+  if (magDst) {
+    magDst.flush();
+    magDst.close();
+  }
   src.close();
   if (SERIAL_DEBUG_LEVEL >= 1) {
     Serial.print("NAND export: done records=");
@@ -2098,6 +2390,8 @@ static NandExportResult exportOneNandLogToSd(const char *nandName, uint32_t oper
     Serial.print((unsigned long)telemRows);
     Serial.print(" att=");
     Serial.print((unsigned long)attitudeRows);
+    Serial.print(" mag=");
+    Serial.print((unsigned long)magRows);
     Serial.print(" bad=");
     Serial.print((unsigned long)badTypeRows);
     Serial.print(" implausible=");

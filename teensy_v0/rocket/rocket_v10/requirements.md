@@ -10,7 +10,7 @@ Primary goal:
 This document is an initial requirements capture based on:
 - existing code in `rocket/rocket_v7`
 - existing protocol/docs in `docs/docs_V7` and `docs/docs_V8`
-- current hardware notes in `debug_projects/context.md`
+- the confirmed Rocket V10 hardware configuration
 - the new hardware list provided for the rocket
 
 ## Existing Baseline To Preserve
@@ -38,6 +38,10 @@ Known V7 implementation details worth reusing:
   - `RST=9`
   - `DIO0=2`
 - GPS on `Serial1`
+- `Serial1` may be selected as a `115200 8N1` maintenance console only when
+  physical SAFE is active, either by an exact `SERVICE UART CONFIRM` handshake
+  at the normal GPS `9600` baud or by holding the service button during
+  power-on; the GPS must be disconnected, and normal reboot restores GPS mode
 - I2C sensor bus on standard Teensy pins
 - telemetry cadence target from prior work:
   - flight: about `5-10 Hz`
@@ -50,14 +54,14 @@ Confirmed hardware for the new rocket flight computer:
 - on-board SD card slot
 - QSPI NAND available on Teensy 4.1 build
   - Winbond `W25N01G`
-  - verified in `debug_projects/context.md`
+  - verified on the target hardware
   - use `LittleFS_QPINAND`
 - LoRa RFM95 `915 MHz`
 - barometer: `MS5607`
 - GPS: `GT-U7`
 - IMU: `LSM9DS1`
 
-Storage notes from current debug work:
+Storage implementation notes:
 - SD card should use `SD.begin(BUILTIN_SDCARD)`
 - QSPI NAND is available for internal logging/config/cache use
 - measured NAND throughput is sufficient for flight logging, but slower on writes than SD

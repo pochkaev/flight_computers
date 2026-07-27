@@ -10,6 +10,7 @@
 #include "ui.h"
 #include "settings.h"
 #include "timing.h"
+#include "imu_service.h"
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -269,7 +270,17 @@ void setup() {
 #endif
 
   Wire.begin();
-  GPS_SERIAL.begin(GPS_BAUD, SERIAL_8N1);
+  const bool uartServiceRequested =
+      digitalRead(ARM_SWITCH_PIN) == ARM_SWITCH_SAFE_LEVEL &&
+      digitalRead(BUTTON_PIN) == (BUTTON_ACTIVE_LOW ? LOW : HIGH);
+  if (uartServiceRequested) {
+    GPS_SERIAL.begin(UART_SERVICE_BAUD, SERIAL_8N1);
+    rocketConsole.useMaintenancePort(GPS_SERIAL);
+    Serial.println("UART SERVICE ACTIVE GPS DISABLED UNTIL REBOOT");
+    Serial.println("OK SERVICE release button; physical SAFE required");
+  } else {
+    GPS_SERIAL.begin(GPS_BAUD, SERIAL_8N1);
+  }
 
 #if defined(__IMXRT1062__)
   analogReadResolution(12);
@@ -295,14 +306,9 @@ void loop() {
   static uint32_t lastBaroMs = 0;
   static uint32_t lastBattMs = 0;
   static uint32_t lastNandImuLogMs = 0;
-  static uint32_t lastImuUs = micros();
-
+  static uint32_t lastNandMagLogMs = 0;
   timingLoopBegin(micros());
   sampleGpsTask();
-
-  uint32_t nowUs = micros();
-  float dtImu = (nowUs - lastImuUs) * 1e-6f;
-  if (dtImu <= 0.0f || dtImu > 0.05f) dtImu = 0.01f;
 
   uint32_t schedulerNowMs = millis();
   updateArmSwitchTask(schedulerNowMs);
@@ -319,9 +325,7 @@ void loop() {
   }
 
   if (taskDue(schedulerNowMs, lastImuMs, IMU_UPDATE_MS)) {
-    lastImuUs = nowUs;
-    sampleImuTask(dtImu);
-    imuSampled = true;
+    imuSampled = sampleImuTask();
   }
 
   if ((uint32_t)(schedulerNowMs - lastBaroMs) >= BARO_UPDATE_MS) {
@@ -357,6 +361,11 @@ void loop() {
     logNandAttitudeBinary(lastImuSampleMs);
 #endif
   }
+  if (imuSampled &&
+      (imuRuntime.qualityFlags & IMU_QUALITY_MAG_FRESH) &&
+      taskDue(flightNowMs, lastNandMagLogMs, NAND_MAG_LOG_UPDATE_MS)) {
+    logNandMagBinary(lastImuSampleMs);
+  }
   if (baroSampled) {
     logNandBaroBinary(lastBaroSampleMs);
   }
@@ -365,6 +374,7 @@ void loop() {
   telemetryTask();
   storageTask();
   updateButtonTask();
+  imuServiceTask();
   // Service again in case a storage operation consumed a meaningful interval.
   updatePyroOutputs(millis());
   serialDebugTask();

@@ -8,6 +8,8 @@
 
 #include "config.h"
 #include "flight.h"
+#include "imu_service.h"
+#include "settings.h"
 #include "state.h"
 
 #define HAS_ADAFRUIT_LSM9DS1 1
@@ -185,83 +187,6 @@ MS5607Sensor ms5607;
 Adafruit_LSM9DS1 lsm = Adafruit_LSM9DS1(&Wire);
 #endif
 
-static float wrapPi(float angle) {
-  while (angle > PI) angle -= 2.0f * PI;
-  while (angle < -PI) angle += 2.0f * PI;
-  return angle;
-}
-
-static float angleDelta(float from, float to) {
-  return wrapPi(to - from);
-}
-
-static float clampFloat(float value, float lo, float hi) {
-  if (value < lo) return lo;
-  if (value > hi) return hi;
-  return value;
-}
-
-static void normalizeAttitudeQuat() {
-  const float norm = sqrtf(attitudeQw * attitudeQw + attitudeQx * attitudeQx +
-                           attitudeQy * attitudeQy + attitudeQz * attitudeQz);
-  if (!isfinite(norm) || norm < 1.0e-6f) {
-    attitudeQw = 1.0f;
-    attitudeQx = 0.0f;
-    attitudeQy = 0.0f;
-    attitudeQz = 0.0f;
-    return;
-  }
-  const float inv = 1.0f / norm;
-  attitudeQw *= inv;
-  attitudeQx *= inv;
-  attitudeQy *= inv;
-  attitudeQz *= inv;
-}
-
-static void setAttitudeQuatFromEuler(float rollRad, float pitchRad, float yawRad) {
-  const float cr = cosf(rollRad * 0.5f);
-  const float sr = sinf(rollRad * 0.5f);
-  const float cp = cosf(pitchRad * 0.5f);
-  const float sp = sinf(pitchRad * 0.5f);
-  const float cy = cosf(yawRad * 0.5f);
-  const float sy = sinf(yawRad * 0.5f);
-
-  attitudeQw = cr * cp * cy + sr * sp * sy;
-  attitudeQx = sr * cp * cy - cr * sp * sy;
-  attitudeQy = cr * sp * cy + sr * cp * sy;
-  attitudeQz = cr * cp * sy - sr * sp * cy;
-  normalizeAttitudeQuat();
-}
-
-static void updateEulerFromAttitudeQuat() {
-  normalizeAttitudeQuat();
-  const float sinrCosp = 2.0f * (attitudeQw * attitudeQx + attitudeQy * attitudeQz);
-  const float cosrCosp = 1.0f - 2.0f * (attitudeQx * attitudeQx + attitudeQy * attitudeQy);
-  roll = atan2f(sinrCosp, cosrCosp);
-
-  const float sinp = 2.0f * (attitudeQw * attitudeQy - attitudeQz * attitudeQx);
-  pitch = asinf(clampFloat(sinp, -1.0f, 1.0f));
-
-  const float sinyCosp = 2.0f * (attitudeQw * attitudeQz + attitudeQx * attitudeQy);
-  const float cosyCosp = 1.0f - 2.0f * (attitudeQy * attitudeQy + attitudeQz * attitudeQz);
-  yaw = atan2f(sinyCosp, cosyCosp);
-  if (yaw < 0.0f) yaw += 2.0f * PI;
-}
-
-static void integrateAttitudeQuatGyro(float gxRadS, float gyRadS, float gzRadS, float dt) {
-  const float halfDt = 0.5f * dt;
-  const float qw = attitudeQw;
-  const float qx = attitudeQx;
-  const float qy = attitudeQy;
-  const float qz = attitudeQz;
-
-  attitudeQw += (-qx * gxRadS - qy * gyRadS - qz * gzRadS) * halfDt;
-  attitudeQx += ( qw * gxRadS + qy * gzRadS - qz * gyRadS) * halfDt;
-  attitudeQy += ( qw * gyRadS - qx * gzRadS + qz * gxRadS) * halfDt;
-  attitudeQz += ( qw * gzRadS + qx * gyRadS - qy * gxRadS) * halfDt;
-  normalizeAttitudeQuat();
-}
-
 static bool isRecent(uint32_t lastMs, uint32_t staleMs) {
   return lastMs != 0 && (uint32_t)(millis() - lastMs) <= staleMs;
 }
@@ -330,7 +255,19 @@ static bool probeI2cAddress(uint8_t addr) {
   return Wire.endTransmission() == 0;
 }
 
+static bool readI2cRegister(uint8_t address, uint8_t reg, uint8_t &value) {
+  Wire.beginTransmission(address);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)address, 1) != 1 || Wire.available() < 1) {
+    return false;
+  }
+  value = Wire.read();
+  return true;
+}
+
 void setupImu() {
+  imuServiceInit();
 #if HAS_ADAFRUIT_LSM9DS1
   const bool imuAgSeen = probeI2cAddress(0x6B);
   const bool imuMagSeen = probeI2cAddress(0x1E);
@@ -343,7 +280,8 @@ void setupImu() {
   }
 
   if (lsm.begin()) {
-    lsm.setupAccel(Adafruit_LSM9DS1::LSM9DS1_ACCELRANGE_16G);
+    lsm.setupAccel(Adafruit_LSM9DS1::LSM9DS1_ACCELRANGE_16G,
+                   Adafruit_LSM9DS1::LSM9DS1_ACCELDATARATE_238HZ);
     lsm.setupGyro(Adafruit_LSM9DS1::LSM9DS1_GYROSCALE_2000DPS);
     lsm.setupMag(Adafruit_LSM9DS1::LSM9DS1_MAGGAIN_4GAUSS);
     imuOk = true;
@@ -360,10 +298,31 @@ void setupImu() {
 }
 
 static void updateGps() {
+  if (rocketConsole.maintenanceActive()) return;
   bool sawBytes = false;
+  static char serviceLine[32] = {};
+  static uint8_t serviceLength = 0;
   while (GPS_SERIAL.available() > 0) {
     sawBytes = true;
-    gps.encode((char)GPS_SERIAL.read());
+    const char c = (char)GPS_SERIAL.read();
+    gps.encode(c);
+    if (c == '\r' || c == '\n') {
+      if (serviceLength > 0) {
+        serviceLine[serviceLength] = '\0';
+        if (strcmp(serviceLine, "SERVICE UART CONFIRM") == 0) {
+          serviceLength = 0;
+          rocketSettingsActivateUartService();
+          return;
+        }
+        serviceLength = 0;
+      }
+    } else if (c >= 32 && c <= 126) {
+      if (serviceLength < sizeof(serviceLine) - 1) {
+        serviceLine[serviceLength++] = c;
+      } else {
+        serviceLength = 0;
+      }
+    }
   }
   if (sawBytes) {
     lastGpsDataMs = millis();
@@ -392,15 +351,30 @@ static void updateGps() {
   updateGpsAltitudeReference();
 }
 
-static void updateImu(float dt) {
+static bool updateImu() {
 #if HAS_ADAFRUIT_LSM9DS1
-  if (!imuOk) return;
+  if (!imuOk) return false;
+
+  // LSM9DS1 XG STATUS_REG: bit 0 = new accel, bit 1 = new gyro.
+  // Accept only a coherent accel+gyro update instead of repeatedly logging
+  // the last register values at the scheduler rate.
+  uint8_t xgStatus = 0;
+  if (readI2cRegister(0x6B, 0x17, xgStatus) &&
+      (xgStatus & 0x03u) != 0x03u) {
+    imuServiceRecordNotReady();
+    return false;
+  }
+  // LIS3MDL STATUS_REG bit 3 indicates a fresh XYZ magnetometer sample.
+  uint8_t magStatus = 0;
+  const bool magFresh =
+      readI2cRegister(0x1E, 0x27, magStatus) && (magStatus & 0x08u);
 
   sensors_event_t accel;
   sensors_event_t mag;
   sensors_event_t gyro;
   sensors_event_t temp;
   lsm.getEvent(&accel, &mag, &gyro, &temp);
+  const uint32_t sampleUs = micros();
 
   const float ax = accel.acceleration.x;
   const float ay = accel.acceleration.y;
@@ -418,7 +392,10 @@ static void updateImu(float dt) {
       fabsf(ax) <= 200.0f && fabsf(ay) <= 200.0f && fabsf(az) <= 200.0f &&
       fabsf(gx) <= 2500.0f && fabsf(gy) <= 2500.0f && fabsf(gz) <= 2500.0f &&
       fabsf(mx) <= 2000.0f && fabsf(my) <= 2000.0f && fabsf(mz) <= 2000.0f;
-  if (!validSample) return;
+  if (!validSample) {
+    imuServiceRecordInvalidSample();
+    return false;
+  }
 
   last_ax = ax;
   last_ay = ay;
@@ -430,76 +407,17 @@ static void updateImu(float dt) {
   last_my = my;
   last_mz = mz;
 
-  float ax_g = last_ax / 9.80665f;
-  float ay_g = last_ay / 9.80665f;
-  float az_g = last_az / 9.80665f;
-  const float accMagG = sqrtf(ax_g * ax_g + ay_g * ay_g + az_g * az_g);
-  const bool accelCorrectionOk = accMagG >= IMU_ACCEL_CORRECT_MIN_G &&
-                                 accMagG <= IMU_ACCEL_CORRECT_MAX_G;
-  const float magMagUt = sqrtf(last_mx * last_mx + last_my * last_my + last_mz * last_mz);
-  const bool magCorrectionOk = accelCorrectionOk &&
-                               magMagUt >= IMU_MAG_CORRECT_MIN_UT &&
-                               magMagUt <= IMU_MAG_CORRECT_MAX_UT;
-  float rollAcc = atan2f(ay_g, az_g);
-  float pitchAcc = atan2f(-ax_g, sqrtf(ay_g * ay_g + az_g * az_g));
-  const bool initializingEstimate = !haveImuEstimate;
-
-  if (initializingEstimate) {
-    roll = rollAcc;
-    pitch = pitchAcc;
-    const float cpInit = cosf(pitch);
-    const float spInit = sinf(pitch);
-    const float crInit = cosf(roll);
-    const float srInit = sinf(roll);
-    const float magXInit = last_mx * cpInit + last_mz * spInit;
-    const float magYInit = last_mx * srInit * spInit + last_my * crInit - last_mz * srInit * cpInit;
-    yaw = atan2f(-magYInit, magXInit);
-    setAttitudeQuatFromEuler(roll, pitch, yaw);
-    updateEulerFromAttitudeQuat();
-    haveImuEstimate = true;
-  } else {
-    integrateAttitudeQuatGyro(last_gx * 0.017453293f,
-                              last_gy * 0.017453293f,
-                              last_gz * 0.017453293f,
-                              dt);
-    updateEulerFromAttitudeQuat();
-
-    float correctedRoll = roll;
-    float correctedPitch = pitch;
-    float correctedYaw = yaw;
-    if (accelCorrectionOk) {
-      correctedRoll = wrapPi(roll + (1.0f - IMU_GYRO_ALPHA) * angleDelta(roll, rollAcc));
-      correctedPitch = wrapPi(pitch + (1.0f - IMU_GYRO_ALPHA) * angleDelta(pitch, pitchAcc));
-    }
-
-    if (magCorrectionOk) {
-      const float cp = cosf(correctedPitch);
-      const float sp = sinf(correctedPitch);
-      const float cr = cosf(correctedRoll);
-      const float sr = sinf(correctedRoll);
-      const float magX = last_mx * cp + last_mz * sp;
-      const float magY = last_mx * sr * sp + last_my * cr - last_mz * sr * cp;
-      const float yawMag = atan2f(-magY, magX);
-      correctedYaw = wrapPi(yaw + (1.0f - IMU_MAG_YAW_ALPHA) * angleDelta(yaw, yawMag));
-    }
-
-    setAttitudeQuatFromEuler(correctedRoll, correctedPitch, correctedYaw);
-    updateEulerFromAttitudeQuat();
-  }
-
-  attitudeAccelCorrectionActive = accelCorrectionOk;
-  attitudeMagCorrectionActive = magCorrectionOk;
-  attitudeGyroOnly = !accelCorrectionOk && !magCorrectionOk;
-  if (attitudeAccelCorrectionActive) diagFlags |= DIAG_ATT_ACCEL_CORR;
-  else diagFlags &= (uint16_t)~DIAG_ATT_ACCEL_CORR;
-  if (attitudeMagCorrectionActive) diagFlags |= DIAG_ATT_MAG_CORR;
-  else diagFlags &= (uint16_t)~DIAG_ATT_MAG_CORR;
-  if (attitudeGyroOnly) diagFlags |= DIAG_ATT_GYRO_ONLY;
-  else diagFlags &= (uint16_t)~DIAG_ATT_GYRO_ONLY;
-
+  static uint32_t previousSampleUs = 0;
+  uint32_t dtUs = previousSampleUs == 0
+                      ? IMU_UPDATE_MS * 1000u
+                      : (uint32_t)(sampleUs - previousSampleUs);
+  previousSampleUs = sampleUs;
+  imuServiceProcessSample(ax, ay, az, gx, gy, gz, mx, my, mz,
+                          sampleUs, dtUs, magFresh);
   lastImuSampleMs = millis();
+  return true;
 #else
-  (void)dt;
+  return false;
 #endif
 }
 
@@ -566,8 +484,8 @@ void sampleGpsTask() {
   updateGps();
 }
 
-void sampleImuTask(float dtImu) {
-  updateImu(dtImu);
+bool sampleImuTask() {
+  return updateImu();
 }
 
 void sampleBaroTask(float dtBaro) {

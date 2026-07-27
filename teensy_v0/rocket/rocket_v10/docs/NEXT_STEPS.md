@@ -11,7 +11,7 @@ The goal is not to copy that project directly. The goal is to evolve RocketV10 s
 - increase local sensor capture rates, especially IMU and barometer
 - improve attitude estimation enough for useful 3D replay
 - keep production firmware understandable and field-serviceable
-- use separate benchmark/test sketches for risky hardware experiments
+- keep temporary hardware experiments outside the production repository
 
 ## Step 1: Log Metadata - Completed
 
@@ -155,22 +155,23 @@ Purpose:
 
 Implemented state:
 
-- estimator now stores attitude internally as a quaternion
-- gyro integration now runs in quaternion space
-- accelerometer correction is disabled when acceleration is far from `1g`
-- magnetometer yaw correction is gated by acceleration sanity and magnetic-field magnitude
+- estimator version `4` stores and corrects attitude directly as a quaternion
+- gyro integration uses calibrated samples and measured microsecond intervals
+- accelerometer correction requires magnitude and quaternion-innovation checks
+- magnetometer correction requires fresh data, field magnitude, and yaw-innovation checks
+- boost is gyro-only and magnetometer correction is restricted to preflight/recovery ground
+- SAFE-only gyro, six-face accelerometer, and magnetometer calibration is checksummed in EEPROM
 - existing roll/pitch/yaw telemetry and CSV fields are still derived for compatibility
-- exported metadata reports attitude estimator version `3`
+- exported metadata reports attitude estimator version `4`
 - diagnostic flags expose:
   - accel correction active
   - mag correction active
   - gyro-only mode
-- compact high-rate attitude records log:
-  - quaternion
-  - derived roll/pitch/yaw
-  - estimator confidence flags
-- service export writes `_att.csv`
-- replay auto-loads sibling `_att.csv`, uses quaternion interpolation when available, and shows confidence state
+- type-10 high-rate IMU records log raw accel/gyro, measured `dt_us`,
+  quaternion, confidence, saturation, rejection, and sample-gap flags
+- type-11 records preserve the calibration snapshot used by the flight
+- service export writes quaternion and quality fields directly into `_imu.csv`
+- replay uses logged quaternion interpolation and shows confidence state
 
 Current limitations:
 
@@ -178,7 +179,8 @@ Current limitations:
 
 Future tuning:
 
-- possible clipping/saturation
+- current LSM9DS1 still has limited margin at `±16 g` and `±2000 dps`
+- data-ready polling is used; FIFO/interrupt wiring is not yet available
 
 Pass criteria:
 
@@ -238,28 +240,7 @@ Pass criteria:
 - replay is smooth without inventing fake data
 - user can tell which parts of attitude/position are trustworthy
 
-## Step 8: Bench Test Sketches
-
-Purpose:
-
-- test hardware limits without adding temporary code to flight firmware
-
-Planned sketches:
-
-- NAND/SD storage benchmark
-- IMU maximum sustainable sample-rate test
-- barometer non-blocking timing test
-- GPS configuration/rate test
-- full loop timing profiler
-- NAND V4 export validator
-
-Pass criteria:
-
-- each risky subsystem can be tested alone
-- production firmware stays clean
-- benchmark results are documented before field use
-
-## Step 9: Long-Term Control Readiness
+## Step 8: Long-Term Control Readiness
 
 Purpose:
 
@@ -280,7 +261,7 @@ Possible future hardware:
 - faster barometer or better pressure sensor
 - GPS module with known high-rate airborne mode
 
-## Step 10: Dedicated Pyro Module Architecture
+## Step 9: Dedicated Pyro Module Architecture
 
 Purpose:
 
@@ -381,5 +362,5 @@ Open design questions:
 7. Completed: update replay to consume multi-rate logs.
 8. Completed: replace Euler attitude internals with quaternion estimator.
 9. Add GPS configuration and metadata.
-10. Add optional barometer timing benchmark if sample spacing or noise looks suspicious.
+10. Validate barometer timing if sample spacing or noise looks suspicious.
 11. Draft dedicated pyro module packet format, pinout, and safety state machine before building hardware.

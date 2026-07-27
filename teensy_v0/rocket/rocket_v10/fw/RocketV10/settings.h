@@ -28,4 +28,5 @@ extern RocketRuntimeSettings rocketSettings;
 
 void rocketSettingsInit();
 void rocketSettingsTask();
+bool rocketSettingsActivateUartService();
 void applyRocketRadioSettings();
