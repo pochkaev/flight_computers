@@ -12,6 +12,31 @@ The goal is not to copy that project directly. The goal is to evolve RocketV10 s
 - improve attitude estimation enough for useful 3D replay
 - keep production firmware understandable and field-serviceable
 - keep temporary hardware experiments outside the production repository
+- preserve physical SAFE/ARM behavior and independent recovery during validation
+- keep quaternion attitude out of flight-critical decisions until multiple
+  flights agree with video, barometer, and GPS evidence
+
+## Current baseline — 2026-07-27
+
+The current installed Rocket V10 firmware is `rv10.20260727b`.
+
+Confirmed on the assembled flight computer:
+
+- IMU calibration is checksummed in EEPROM with `CAL_FLAGS 7`
+- sensor-to-airframe alignment version `2` is valid
+- a real all-power-off reboot returned to the same reference pose within about
+  `3.1 degrees`
+- the current calibration values are archived in
+  [`../calibration/rocket_v10_imu_20260727.json`](../calibration/rocket_v10_imu_20260727.json)
+- quaternion attitude is logged and visualized but does not affect launch,
+  apogee, recovery state, landed detection, or pyro decisions
+- physical pyro control is currently `NONE`; deployment decisions are logged
+  only
+- Rocket NAND is the authoritative onboard flight record; Ground SD is
+  independent radio/link corroboration
+
+The project is now in flight-validation rather than feature-expansion mode.
+Freeze and identify this baseline before making another major firmware change.
 
 ## Step 1: Log Metadata - Completed
 
@@ -80,30 +105,29 @@ Purpose:
 
 Implemented state:
 
-- IMU is sampled at `200 Hz`
-- NAND full-state records are still written at `50 Hz`
-- NAND compact IMU records are written at `200 Hz`
-- LoRa and SD CSV rates are unchanged
-- service export can generate full-state CSV and optional high-rate `_imu.csv`
-- quick field export is supported with `export_latest_only=1` and `export_imu=0`
+- accelerometer and gyro are coherently sampled at up to `200 Hz`
+- fresh magnetometer samples are recorded at up to `25 Hz`
+- NAND full-state records are written at `10 Hz`
+- current type-10 quaternion IMU records are written at up to `200 Hz`,
+  reducing to `50 Hz` during descent states
+- LoRa packet rates are unchanged
+- runtime SD logging is disabled
+- SAFE-only service export generates a main CSV and all available detail CSVs
 
 Implemented items:
 
-- added high-rate IMU-only NAND records
-- started with `200 Hz`
-- kept the existing low-rate SD CSV path readable
-- V4 typed NAND records are now the current production format:
-  - type `1`: full state
-  - type `2`: IMU
+- added 40-byte high-rate quaternion IMU records
+- included measured `dt_us`, wide gyro values, quaternion, estimator
+  confidence, and quality flags
+- added independent fresh-magnetometer records
 - verified full export with `_imu.csv`
-- verified fast latest-only export without `_imu.csv`
 - verified NAND erase after successful export
 - documented that full multi-log IMU CSV export is slow because Teensy formats large text CSV streams
 
 Pass criteria:
 
 - exported logs contain a high-rate `_imu.csv` with accel/gyro data: complete
-- replay can use high-rate IMU data for the rocket model: complete for exported V4 CSV plus sibling `_imu.csv`
+- replay uses the recorded quaternion for rocket orientation: complete
 - no LoRa rate increase is required: complete
 
 ## Step 4: NAND Log Format V4 - Completed
@@ -123,12 +147,15 @@ Implemented items:
 - add sequence counters
 - add stream-specific records:
   - full state
-  - IMU
+  - quaternion IMU
+  - magnetometer
   - barometer
   - GPS
   - battery
   - flight state/event
   - telemetry snapshot
+  - calibration metadata
+  - sensor-to-airframe alignment metadata
 - service export writes full-state CSV plus optional detail CSVs:
   - `_imu.csv`
   - `_baro.csv`
@@ -137,8 +164,12 @@ Implemented items:
   - `_event.csv`
   - `_telem.csv`
   - `_att.csv`
-- quick field export can still skip detail CSVs with `export_imu=0`
-- optional future export optimization remains possible if full detail CSV export is too slow for field workflow
+- a 64 KiB rolling PAD window prevents a long armed wait from consuming the
+  flight buffer
+- armed/in-flight records use 512 KiB primary RAM plus a 64 KiB critical
+  reserve and are committed to NAND only after a terminal state
+- optional future export optimization remains possible if full detail CSV
+  export is too slow for field workflow
 
 Pass criteria:
 
@@ -170,45 +201,56 @@ Implemented state:
 - type-10 high-rate IMU records log raw accel/gyro, measured `dt_us`,
   quaternion, confidence, saturation, rejection, and sample-gap flags
 - type-11 records preserve the calibration snapshot used by the flight
+- type-12 records preserve fresh magnetometer samples
+- type-13 records preserve the sensor-to-airframe alignment used by the flight
 - service export writes quaternion and quality fields directly into `_imu.csv`
 - replay uses logged quaternion interpolation and shows confidence state
+- deterministic gravity-plus-horizontal-magnetic startup avoids the installed
+  nose-up gravity singularity
+- aligned output uses airframe `+Z` through the rocket nose
 
 Current limitations:
 
 - this is better than the Euler-state estimator but still not control-grade
+- aggressive motion or thrust correctly causes temporary low confidence and
+  gyro-only propagation
+- magnetometer evidence is susceptible to nearby steel, current, and motors
 
 Future tuning:
 
 - current LSM9DS1 still has limited margin at `±16 g` and `±2000 dps`
 - data-ready polling is used; FIFO/interrupt wiring is not yet available
+- tune only from real flight evidence, not from a single bench movement
 
 Pass criteria:
 
 - no artificial roll/pitch flips during boost due to thrust acceleration
 - replay uses quaternion attitude when available: complete
 - logs make it clear when attitude is gyro-only and may drift: complete
+- installed calibration, alignment, and cold-reboot repeatability: complete
 
-## Step 6: GPS Configuration
+## Step 6: GPS Data Logging - Completed
 
 Purpose:
 
-- make GPS behavior intentional instead of passive
-- improve ground track and recovery data
+- preserve GPS timing and quality evidence independently from the barometer
+- improve mapped ground-track and recovery analysis
 
-Planned items:
+Implemented state:
 
-- configure GPS update rate if supported by the module
-- configure airborne/dynamic model if supported
-- reduce unused NMEA messages
-- log GPS fix age, HDOP, satellites, and validity flags clearly
-- target `5 Hz` first
-- evaluate `10 Hz` only if the module and serial bandwidth support it
+- type-4 records contain position, absolute/relative altitude, speed, fix age,
+  HDOP, satellites, validity flags, parser counters, and barometer/GPS
+  difference
+- GPS remains informational and independent from launch, apogee, recovery,
+  deployment, and landed decisions
+- the analyzer maps valid GPS fixes and separates GPS ground track from
+  barometric altitude
 
 Pass criteria:
 
-- GPS update rate is known from configuration/log metadata
-- exported logs show GPS timing and quality clearly
-- replay ground track is smoother and easier to trust
+- exported logs show GPS timing and quality clearly: complete
+- replay uses only validated fixes: complete
+- GPS cannot block flight-state logic: complete
 
 ## Step 7: Replay and Analysis Upgrade - Completed
 
@@ -219,14 +261,14 @@ Purpose:
 
 Implemented items:
 
-- update replay generator to read V4 logs
+- `visualizer/rocket_v10_log_analyzer.py` reads V4 multi-rate exports
 - use high-rate IMU stream for rocket body motion
 - use barometer stream for altitude
 - use GPS stream for ground track
 - show sensor-rate summary:
   - full-state samples/sec
   - IMU samples/sec when `_imu.csv` is available
-- allow full-state-only replay when quick field export used `export_imu=0`
+- allow summary-only analysis when detail CSV streams are not exported
 - update flight report parser to skip exported V4 metadata comment lines
 - show estimator confidence on the replay with `_att.csv`
 - show richer sensor-rate summary:
@@ -234,133 +276,174 @@ Implemented items:
   - GPS samples/sec
   - long stream gaps
 - visually mark periods where attitude is gyro-only in the scene, charts, and timeline
+- `visualizer/rocket_v10_imu_demo.py` creates a self-contained offline bench
+  orientation replay from `IMU STREAM` captures
 
 Pass criteria:
 
 - replay is smooth without inventing fake data
 - user can tell which parts of attitude/position are trustworthy
 
-## Step 8: Long-Term Control Readiness
+## Step 8: Flight Validation Campaign — Current priority
 
 Purpose:
 
-- keep future active stabilization possible without committing to it now
+- prove the complete recorder and state machine with real flights
+- compare onboard attitude against independent evidence
+- change thresholds only when flight data demonstrates a need
 
-Planned items:
+Flight rollout:
 
-- log control-relevant state at high rate
-- estimate body attitude and angular rates robustly
-- add sensor saturation flags
-- add loop timing and latency measurements
-- keep actuator/control code out until estimator and logs are trustworthy
+1. Freeze and identify the firmware, settings, and calibration used.
+2. Keep motor or another independent system responsible for parachute
+   deployment; keep Rocket V10 pyro output disabled.
+3. Record high-frame-rate ground video when practical.
+4. After every flight, preserve Rocket NAND and Ground SD logs before erasing
+   either device.
+5. Generate the analyzer report and review:
+   - launch evidence and launch timestamp
+   - all flight-state transitions
+   - barometer altitude/velocity quality and apogee decision delay
+   - IMU rate, sample gaps, saturation, confidence, and quaternion norm
+   - `airframe_aligned`, accelerometer correction, magnetometer correction,
+     and gyro-only coverage
+   - GPS fix quality and ground track
+   - LoRa RSSI, packet age, and missed packets from Ground logs
+   - RAM usage, dropped records, finalization, and close reason
+6. Compare orientation and recovery events with video and trajectory.
 
-Possible future hardware:
+Acceptance target:
 
-- better IMU with lower gyro drift
-- dedicated high-G accelerometer
-- faster barometer or better pressure sensor
-- GPS module with known high-rate airborne mode
+- several successful low-power flights and at least one representative
+  higher-power flight
+- zero critical recorder drops
+- no unexplained state transitions or loop stalls
+- attitude behavior consistent with video within the limits of the current IMU
+- complete finalized onboard logs after landing
 
-## Step 9: Dedicated Pyro Module Architecture
+Do not make quaternion attitude flight-critical merely because one flight
+looks good.
+
+## Step 9: Power-loss-resilient flight recording
 
 Purpose:
 
-- decide whether to move real pyro outputs out of the main Teensy flight computer
-- make deployment more robust if the main flight computer resets, brownouts, or software gets stuck
-- keep early dual-deploy work safe by testing a separate module in log-only or dummy-load mode before real charges
+- preserve useful flight evidence if power is lost before `LANDED` or `ABORT`
+- retain the current rule that storage must not delay the flight-state kernel
 
-Candidate architecture:
+Current limitation:
 
-- main Teensy remains responsible for navigation, LoRa, SD/NAND logging, replay data, and ground telemetry
-- dedicated pyro module handles deployment outputs with its own controller, battery, barometer, and local state machine
-- possible prototype controller: XIAO SAMD21
-- possible prototype sensor: BMP180 for bench redundancy only; prefer a newer barometer such as BMP388/BMP390, MS5607/MS5611, or LPS22/LPS28 for serious deployment work
-- pyro module has its own 2S pyro battery, 4 MOSFET outputs, physical arm/safe input, and per-channel enable/configuration
-- main Teensy connects to pyro module only with data wires, not by sharing pyro output current paths
+- armed/in-flight records remain in volatile RAM
+- sudden power removal before finalization loses the buffered flight portion
+- direct NAND filesystem operations previously caused pauses near `80 ms`
 
-Expected advantage:
+Investigation order:
 
-- if the module is only a MOSFET expander that fires when Teensy sends a command, the gain is small and complexity goes up
-- the real value comes when the pyro module is autonomous enough to deploy safely if the main Teensy disappears
-- Teensy can still send deployment commands, but the pyro module should verify them against its own barometer, timers, and arming state before firing
+1. Measure commit time and worst-case loop effects with the current NAND.
+2. Prototype bounded, asynchronous checkpoints outside the time-critical path.
+3. Evaluate dedicated SPI/QSPI FRAM or MRAM if NAND checkpoints cannot meet
+   timing requirements.
+4. Add a recoverable segment format with sequence numbers, CRC, and explicit
+   finalization state.
+5. Fault-test resets and power removal at PAD, boost, coast, descent, and
+   post-flight states.
 
-Startup/config flow:
+Pass criteria:
 
-- before flight, Teensy sends initial pyro configuration to the module
-- configuration should include:
-  - channel function: apogee/drogue, main, disabled, future staging/airstart
-  - per-channel output enable
-  - per-channel log enable
-  - apogee delay
-  - main deployment altitude
-  - minimum time after apogee before main
-  - minimum apogee margin above main altitude
-  - safety mode/checksum/version
-- pyro module stores the active config in RAM and reports it back to Teensy
-- ground should eventually show both Teensy config and pyro-module acknowledged config
+- no flight-kernel deadline regression
+- after injected power loss, the latest valid segment can be recovered
+- a corrupt/incomplete segment cannot hide earlier valid records
 
-Flight behavior:
+## Step 10: GPS configuration and validation
 
-- Teensy may send events such as `APOGEE_DETECTED` or `MAIN_ALLOWED`
-- pyro module should not blindly trust a fire command
-- pyro module should fire only when:
-  - physical arm/safe input is armed
-  - channel output is enabled
-  - continuity is acceptable, when continuity hardware is available
-  - local deployment logic says the event is valid
-  - local battery voltage is acceptable
-- if Teensy link is lost during flight, pyro module should continue with its own fallback logic
-- fallback main logic should be altitude/descent based, not just "main altitude minus 50 m"
-- main should deploy on descent when altitude is at or below the configured main altitude, but only if the flight reached safely above that altitude by a configured margin
-- if main is configured for `500 ft` and the flight only reaches `400 ft`, the main channel should stay inhibited instead of firing immediately after apogee
+Implement Step 6 after the current flight baseline is preserved:
 
-Recommended communication:
+- identify the exact module and supported binary configuration protocol
+- configure a known airborne/dynamic model
+- target `5 Hz` and reduce unused NMEA output
+- verify actual update rate, fix age, parser errors, and serial bandwidth
+- store commanded and observed GPS configuration in log metadata
+- compare GPS track with the existing barometer and mapped replay
 
-- use UART with CRC, sequence numbers, and acknowledgements as the first implementation
-- avoid I2C between boards for flight-critical inter-board communication because a noisy or reset device can hang the bus
-- consider RS485 if wiring gets longer or noisy
-- consider CAN only if the project grows into a larger avionics bus
+GPS remains informational and must not become a launch, apogee, deployment, or
+landed dependency.
 
-Required module safety features:
+## Step 11: Deployment qualification
 
-- outputs forced inactive on boot/reset
-- MOSFET gate pulldowns
-- independent pyro battery voltage measurement
-- physical arm/safe input
-- per-channel output enable
-- per-channel continuity sensing
-- command timeout/watchdog
-- local event log if possible
-- status report back to Teensy: armed state, battery, barometer state, continuity, active config, fired/logged events
+Purpose:
 
-Prototype plan:
+- progress from log-only decisions to deployment outputs without making the
+  rocket dependent on unproven software
 
-1. Build a log-only or LED/dummy-load XIAO pyro module.
-2. Send config from Teensy before flight.
-3. Make the module report acknowledged config and local status.
-4. Let the module detect apogee/main from its own barometer and log what it would do.
-5. Compare module decisions with Teensy/NAND logs after multiple flights.
-6. Only after confidence is high, enable real MOSFET outputs for one channel at a time.
+Required order:
 
-Open design questions:
+1. Keep `PYRO_CONTROL NONE` during the flight-validation campaign.
+2. Replay real flight logs through the deployment state machine.
+3. Bench-test with LEDs and resistive dummy loads.
+4. Verify boot/reset output-off behavior, gate pulldowns, physical SAFE,
+   continuity, current sensing, battery limits, pulse timing, and watchdogs.
+5. Perform inert e-match tests in a controlled setup.
+6. Enable one output/function at a time while retaining an independent
+   recovery system.
 
-- exact controller and barometer choice
-- whether the pyro module needs its own nonvolatile log storage
-- continuity sensing circuit and current limit
-- connector/pinout between Teensy and pyro module
-- packet format and failsafe behavior if config is missing or corrupt
-- whether to keep main Teensy pyro outputs as a backup or remove real outputs from Teensy entirely
+An autonomous dedicated pyro module remains a possible future architecture.
+It is valuable only if it has its own power, physical arming, barometer,
+validated local state machine, continuity sensing, watchdog, and event log.
+A simple remote MOSFET expander adds complexity without meaningful
+independence. UART with CRC, sequence numbers, and acknowledgements is the
+preferred first inter-board transport; do not use a shared I2C bus for a
+flight-critical module.
 
-## Immediate Implementation Order
+Pass criteria:
 
-1. Completed: NAND log metadata.
-2. Completed: staged `50 Hz` MS5607 path.
-3. Completed: NAND V4 typed records.
-4. Completed: high-rate `200 Hz` IMU-only NAND stream.
-5. Completed: V4 export tooling, including latest-only and optional IMU export.
-6. Completed: finish V4 stream-specific records.
-7. Completed: update replay to consume multi-rate logs.
-8. Completed: replace Euler attitude internals with quaternion estimator.
-9. Add GPS configuration and metadata.
-10. Validate barometer timing if sample spacing or noise looks suspicious.
-11. Draft dedicated pyro module packet format, pinout, and safety state machine before building hardware.
+- independent recovery remains available
+- no output can energize during boot, reset, SAFE, corrupt configuration, or
+  missing communication
+- logged and physical output events agree across repeated tests
+
+## Step 12: Hardware and system robustness
+
+Evaluate after the current flight campaign identifies real limits:
+
+- lower-drift IMU with suitable gyro range
+- dedicated high-g accelerometer
+- redundant barometer
+- vibration isolation validated against flight data
+- robust locking connectors and power-loss protection
+- thermal testing for both Rocket and Ground modules
+- Ground display watchdog/reinitialization while keeping launch control
+  independent of display health
+
+Active stabilization is a separate, long-term project. Keep actuator/control
+code out until the estimator, sensors, timing, power, redundancy, and flight
+evidence are control-grade.
+
+## Field workflow
+
+Before flight:
+
+1. Cold-boot in the final pad orientation without UART service mode.
+2. Confirm expected firmware and settings.
+3. Confirm barometer, IMU, NAND, LoRa, and battery health.
+4. Confirm `CAL_FLAGS 7`, valid alignment, zero recorder drops, and intended
+   pyro mode.
+5. Wait for the normal pad-settle and `READY` sequence before launch.
+
+After flight:
+
+1. Keep the rocket powered until the log is finalized.
+2. Return to physical SAFE.
+3. Inspect `NAND LIST`, `NAND INFO`, `STORAGE STATUS`, and timing counters.
+4. Download and archive Rocket NAND and Ground SD logs.
+5. Generate the visual report and record findings before changing firmware.
+
+## Immediate implementation order
+
+1. Freeze, commit, and tag the current tested Rocket/Ground baseline.
+2. Run the controlled flight-validation campaign and review every flight.
+3. Fix only issues supported by recorded evidence.
+4. Design and test power-loss-resilient recording.
+5. Configure and validate GPS at `5 Hz`.
+6. Qualify deployment hardware and logic with dummy loads and independent
+   recovery.
+7. Consider hardware sensor upgrades from measured flight limitations.
