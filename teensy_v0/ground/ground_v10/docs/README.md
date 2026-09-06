@@ -4,6 +4,7 @@ Firmware:
 
 - [GroundStationV10.ino](/Users/k_pochkaev/github/flight_computers/teensy_v0/ground/ground_v10/fw/GroundStationV10/GroundStationV10.ino)
 - [config.h](/Users/k_pochkaev/github/flight_computers/teensy_v0/ground/ground_v10/fw/GroundStationV10/config.h)
+- [Flight log archive](../../../FLIGHT_LOG_ARCHIVE.md)
 - [AI_CONTEXT.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/ground/ground_v10/docs/AI_CONTEXT.md)
 - [NEXT_STEPS.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/ground/ground_v10/docs/NEXT_STEPS.md)
 - [BUILD_UPLOAD_TEENSY.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/docs/BUILD_UPLOAD_TEENSY.md)

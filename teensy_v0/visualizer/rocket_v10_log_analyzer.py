@@ -186,6 +186,32 @@ def event_time(
     return None
 
 
+def detect_boost_end_ms(imu: list[dict[str, Any]], launch_ms: int) -> int | None:
+    """Find the first sustained low-specific-force interval after powered flight."""
+    samples = [
+        row
+        for row in imu
+        if launch_ms <= row["ms"] <= launch_ms + 10_000
+        and row.get("state") == 2
+        and row.get("g") is not None
+    ]
+    if not samples:
+        return None
+    powered_seen = False
+    for index, row in enumerate(samples):
+        if row["g"] >= 1.5:
+            powered_seen = True
+        if not powered_seen or row["ms"] < launch_ms + 300 or row["g"] >= 1.2:
+            continue
+        end_ms = row["ms"] + 150
+        window = [sample for sample in samples[index:] if sample["ms"] <= end_ms]
+        if window and window[-1]["ms"] - row["ms"] >= 120 and all(
+            sample["g"] < 1.2 for sample in window
+        ):
+            return row["ms"]
+    return None
+
+
 def load_exports(main_path: Path) -> tuple[dict[str, str], dict[str, list[dict[str, str]]]]:
     metadata, main_rows = read_csv_with_metadata(main_path)
     exports: dict[str, list[dict[str, str]]] = {"main": main_rows}
@@ -201,7 +227,7 @@ def load_exports(main_path: Path) -> tuple[dict[str, str], dict[str, list[dict[s
     return metadata, exports
 
 
-def build_payload(main_path: Path) -> dict[str, Any]:
+def build_payload(main_path: Path, *, drogue_nose_down: bool = False) -> dict[str, Any]:
     metadata, exports = load_exports(main_path)
 
     full: list[dict[str, Any]] = []
@@ -330,6 +356,9 @@ def build_payload(main_path: Path) -> dict[str, Any]:
         )
     imu_all.sort(key=lambda row: row["ms"])
     imu = decimate(imu_all, 15_000)
+    boost_end_ms = detect_boost_end_ms(imu_all, launch_ms)
+    heading_referenced = any(row.get("magCorr") == 1 for row in imu_all)
+    mag_rejected_rows = sum(row.get("magRejected") == 1 for row in imu_all)
 
     magnetometer: list[dict[str, Any]] = []
     for source in exports["mag"]:
@@ -445,6 +474,10 @@ def build_payload(main_path: Path) -> dict[str, Any]:
             "lat": median(row["lat"] for row in pad_source),
             "lon": median(row["lon"] for row in pad_source),
         }
+        for row in gps:
+            row["e"], row["n"] = local_east_north_m(
+                row["lat"], row["lon"], pad["lat"], pad["lon"]
+            )
     landing_source = [row for row in gps if row["ms"] >= landed_ms - 5_000]
     if not landing_source:
         landing_source = gps[-min(3, len(gps)) :]
@@ -464,6 +497,15 @@ def build_payload(main_path: Path) -> dict[str, Any]:
             lon = interpolate_value(gps, gps_times, row["ms"], "lon")
             if lat is None or lon is None:
                 continue
+            gps_index = bisect.bisect_left(gps_times, row["ms"])
+            nearest_indices = [
+                index
+                for index in (gps_index - 1, gps_index)
+                if 0 <= index < len(gps_times)
+            ]
+            gps_age_s = min(
+                abs(row["ms"] - gps_times[index]) for index in nearest_indices
+            ) / 1000.0
             east, north = local_east_north_m(lat, lon, pad["lat"], pad["lon"])
             trajectory_3d.append(
                 {
@@ -472,6 +514,9 @@ def build_payload(main_path: Path) -> dict[str, Any]:
                     "e": east,
                     "n": north,
                     "u": max(0.0, row["alt"]),
+                    "lat": lat,
+                    "lon": lon,
+                    "gpsAgeS": gps_age_s,
                     "state": row["state"],
                 }
             )
@@ -536,6 +581,13 @@ def build_payload(main_path: Path) -> dict[str, Any]:
             else None
         ),
         "physicalPyroObserved": any("OUTPUT_ON" in event["name"] for event in events),
+        "boostEndS": (
+            (boost_end_ms - launch_ms) / 1000.0 if boost_end_ms is not None else None
+        ),
+        "headingReferenced": heading_referenced,
+        "magRejectedPercent": (
+            100.0 * mag_rejected_rows / len(imu_all) if imu_all else None
+        ),
     }
 
     return {
@@ -570,6 +622,10 @@ def build_payload(main_path: Path) -> dict[str, Any]:
             ) + len(exports["att"]),
             "calibrationFlags": finite_int(metadata.get("imu_cal_flags")),
             "calibrationVersion": finite_int(metadata.get("imu_cal_version")),
+        },
+        "visualization": {
+            "drogueNoseDown": drogue_nose_down,
+            "droguePoseSource": "eyewitness observation" if drogue_nose_down else None,
         },
         "events": events,
         "sourceFiles": source_files,
@@ -758,6 +814,8 @@ input[type=range] { width:100%; accent-color:var(--cyan); }
   color:var(--ink); background:#152234; border:1px solid var(--line); border-radius:9px;
   padding:7px 9px; cursor:pointer;
 }
+.position-panel { margin-bottom:14px; }
+.position-chart { height:440px; }
 .charts { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
 .chart { height:340px; }
 .events-wide { margin-top:14px; }
@@ -788,6 +846,7 @@ input[type=range] { width:100%; accent-color:var(--cyan); }
   .view-actions { justify-content:flex-start; }
   .flight-3d-wrap { height:500px; min-height:420px; }
   .flight-3d-overlay.bottom .scene-chip:last-child { max-width:78%; }
+  .position-chart { height:390px; }
 }
 </style>
 </head>
@@ -840,10 +899,11 @@ input[type=range] { width:100%; accent-color:var(--cyan); }
     <div class="panel-head flight-3d-head">
       <div>
         <div class="panel-title">3D flight reconstruction</div>
-        <div class="panel-note">Measured GPS + barometric AGL · logged IMU attitude relative to the stable pad pose</div>
+        <div class="panel-note">Measured position · reconstructed pose by default · exact IMU quaternion remains diagnostic</div>
       </div>
       <div class="view-actions">
-        <button class="view-button active" id="attitude-logged" type="button">Logged attitude</button>
+        <button class="view-button active" id="attitude-reconstructed" type="button">Reconstructed pose</button>
+        <button class="view-button" id="attitude-logged" type="button">IMU diagnostic</button>
         <button class="view-button" id="attitude-path" type="button">Path direction</button>
         <span class="view-divider" aria-hidden="true"></span>
         <button class="view-button active" id="view-orbit" type="button">Orbit view</button>
@@ -854,7 +914,8 @@ input[type=range] { width:100%; accent-color:var(--cyan); }
     <div class="flight-3d-wrap">
       <div id="flight-3d" aria-label="Interactive 3D rocket flight reconstruction"></div>
       <div class="flight-3d-overlay top">
-        <div class="scene-chip" id="scene-position"><strong>Position</strong> —</div>
+        <div class="scene-chip" id="scene-position"><strong>Measured position</strong> —</div>
+        <div class="scene-chip" id="scene-source"><strong>Sources</strong> —</div>
         <div class="scene-chip" id="scene-state"><strong>Phase</strong> —</div>
         <div class="scene-chip" id="scene-attitude"><strong>Attitude</strong> —</div>
         <div class="scene-chip" id="scene-recovery" hidden><strong>Recovery</strong> canopy pose is illustrative</div>
@@ -872,6 +933,14 @@ input[type=range] { width:100%; accent-color:var(--cyan); }
     <input id="scrubber" type="range" min="0" max="1" value="0" step=".02" aria-label="Flight time">
     <select class="speed" id="speed" aria-label="Playback speed"><option value=".1">0.1×</option><option value=".25">0.25×</option><option value=".5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="5">5×</option><option value="10">10×</option></select>
   </section>
+
+  <article class="panel position-panel">
+    <div class="panel-head">
+      <div><div class="panel-title">Measured ground position</div><div class="panel-note">Validated GPS fixes in local pad coordinates · moving marker is interpolated between fixes</div></div>
+      <div class="panel-note" id="position-quality">—</div>
+    </div>
+    <div class="position-chart" id="position-chart"></div>
+  </article>
 
   <section class="charts">
     <article class="panel"><div class="panel-head"><div class="panel-title">Altitude & velocity</div><div class="panel-note">Barometric flight solution</div></div><div class="chart" id="flight-chart"></div></article>
@@ -901,6 +970,9 @@ const metrics = DATA.metrics;
 const finite = value => Number.isFinite(value);
 const fmt = (value, digits=1) => finite(value) ? value.toFixed(digits) : "—";
 const stateName = state => states[state] || `STATE ${state}`;
+const phaseNameAt = (state,t) => state===2&&finite(metrics.boostEndS)&&t>metrics.boostEndS
+  ? "ASCENT · COASTING"
+  : stateName(state);
 const stateColor = state => colors[state] || "#55d8ff";
 const duration = metrics.durationS || Math.max(...DATA.baro.map(p => p.t), 0);
 const minTime = Math.min(...DATA.baro.map(p => p.t), 0);
@@ -936,6 +1008,21 @@ function nearest(points, t) {
   while (lo<hi) { const mid=Math.floor((lo+hi)/2); if (points[mid].t<t) lo=mid+1; else hi=mid; }
   if (lo>0 && Math.abs(points[lo-1].t-t)<Math.abs(points[lo].t-t)) return points[lo-1];
   return points[lo];
+}
+function interpolatedGps(t) {
+  if (!gps.length) return null;
+  let lo=0, hi=gps.length-1;
+  while (lo<hi) { const mid=Math.floor((lo+hi)/2); if (gps[mid].t<t) lo=mid+1; else hi=mid; }
+  if (lo===0) return {...gps[0],gpsAgeS:Math.abs(t-gps[0].t)};
+  if (lo>=gps.length) return {...gps[gps.length-1],gpsAgeS:Math.abs(t-gps[gps.length-1].t)};
+  const a=gps[lo-1],b=gps[lo];
+  const fraction=b.t===a.t ? 0 : Math.max(0,Math.min(1,(t-a.t)/(b.t-a.t)));
+  const mix=key=>finite(a[key])&&finite(b[key]) ? a[key]+(b[key]-a[key])*fraction : null;
+  return {
+    t, lat:mix("lat"), lon:mix("lon"), e:mix("e"), n:mix("n"),
+    sats:fraction<.5?a.sats:b.sats, state:fraction<.5?a.state:b.state,
+    gpsAgeS:Math.min(Math.abs(t-a.t),Math.abs(t-b.t))
+  };
 }
 function timecode(t) {
   const sign=t<0 ? "−" : "+";
@@ -991,6 +1078,41 @@ const chartLayout=(yTitle,extra={})=>({
 const eventShapes=DATA.events.filter(e=>e.name==="STATE_CHANGE").map(e=>({
   type:"line",x0:e.t,x1:e.t,y0:0,y1:1,yref:"paper",line:{color:stateColor(e.to),width:1,dash:"dot"}
 }));
+const gpsPositionRows=gps.filter(p=>finite(p.e)&&finite(p.n));
+if(gpsPositionRows.length){
+  Plotly.newPlot("position-chart",[
+    {
+      x:gpsPositionRows.map(p=>p.e),y:gpsPositionRows.map(p=>p.n),
+      customdata:gpsPositionRows.map(p=>p.t),name:"Recorded track",mode:"lines",
+      line:{color:"rgba(85,216,255,.58)",width:4},hoverinfo:"skip"
+    },
+    {
+      x:gpsPositionRows.map(p=>p.e),y:gpsPositionRows.map(p=>p.n),
+      customdata:gpsPositionRows.map(p=>p.t),name:"GPS fixes",mode:"markers",
+      marker:{color:gpsPositionRows.map(p=>stateColor(p.state)),size:7,line:{color:"#dff8ff",width:1}},
+      text:gpsPositionRows.map(p=>`${timecode(p.t)} · ${p.sats ?? "—"} satellites`),
+      hovertemplate:"%{text}<br>E %{x:.1f} m · N %{y:.1f} m<extra></extra>"
+    },
+    {
+      x:[gpsPositionRows[0].e],y:[gpsPositionRows[0].n],name:"Rocket now",mode:"markers",
+      marker:{color:"#ffffff",size:18,symbol:"triangle-up",line:{color:"#55d8ff",width:3}},
+      hovertemplate:"Rocket now<br>E %{x:.1f} m · N %{y:.1f} m<extra></extra>"
+    },
+    {
+      x:[0],y:[0],name:"Pad",mode:"markers",
+      marker:{color:"#4dd6a7",size:13,symbol:"circle",line:{color:"#ffffff",width:2}},
+      hovertemplate:"Launch pad<extra></extra>"
+    }
+  ],{
+    ...chartLayout("North from pad (m)"),
+    margin:{l:64,r:30,t:28,b:56},
+    xaxis:{title:"East from pad (m)",gridcolor:"rgba(149,168,195,.10)",zerolinecolor:"rgba(85,216,255,.32)"},
+    yaxis:{title:"North from pad (m)",gridcolor:"rgba(149,168,195,.10)",zerolinecolor:"rgba(85,216,255,.32)",scaleanchor:"x",scaleratio:1},
+    legend:{orientation:"h",x:0,y:1.1},hovermode:"closest"
+  },plotConfig);
+}else{
+  document.getElementById("position-chart").innerHTML='<div style="height:100%;display:grid;place-items:center;color:#8e9caf">No validated GPS position available</div>';
+}
 Plotly.newPlot("flight-chart",[
   {x:DATA.baro.map(p=>p.t),y:DATA.baro.map(p=>p.alt),name:"Altitude",mode:"lines",line:{color:"#ff875c",width:2.4}},
   {x:DATA.baro.map(p=>p.t),y:DATA.baro.map(p=>p.vel),name:"Velocity",mode:"lines",yaxis:"y2",line:{color:"#55d8ff",width:1.8}}
@@ -1069,17 +1191,18 @@ eventContainer.addEventListener("click",event=>{
 const scrubber=document.getElementById("scrubber");
 scrubber.min=minTime; scrubber.max=maxTime; scrubber.value=minTime;
 const playButton=document.getElementById("play");
-let currentTime=minTime, playing=false, lastFrame=0;
+let currentTime=minTime, playing=false, lastFrame=0, lastPositionPlotTime=-Infinity;
 function setTime(t,pan=false){
   currentTime=Math.max(minTime,Math.min(maxTime,t));
+  window.flightCurrentTime=currentTime;
   scrubber.value=currentTime;
   const baro=nearest(DATA.baro,currentTime);
   const imu=nearest(DATA.imu,currentTime);
   const batt=nearest(DATA.battery,currentTime);
   const full=nearest(DATA.full,currentTime);
-  const point=nearest(gps,currentTime);
+  const point=interpolatedGps(currentTime);
   const state=full?.state ?? baro?.state ?? point?.state ?? 0;
-  document.getElementById("phase-name").textContent=stateName(state);
+  document.getElementById("phase-name").textContent=phaseNameAt(state,currentTime);
   document.getElementById("phase-name").style.color=stateColor(state);
   document.getElementById("phase-time").textContent=timecode(currentTime);
   document.getElementById("timecode").textContent=timecode(currentTime);
@@ -1090,6 +1213,16 @@ function setTime(t,pan=false){
   if(rocketMarker && point){
     rocketMarker.setLatLng([point.lat,point.lon]);
     if(pan) map.panTo([point.lat,point.lon]);
+  }
+  const positionQuality=document.getElementById("position-quality");
+  if(point&&finite(point.e)&&finite(point.n)){
+    positionQuality.textContent=`E ${point.e.toFixed(1)} m · N ${point.n.toFixed(1)} m · nearest GPS fix ${point.gpsAgeS.toFixed(2)} s`;
+    if(Math.abs(currentTime-lastPositionPlotTime)>=.04 || pan){
+      Plotly.restyle("position-chart",{x:[[point.e]],y:[[point.n]]},[2]);
+      lastPositionPlotTime=currentTime;
+    }
+  }else{
+    positionQuality.textContent="GPS position unavailable";
   }
   if(window.flight3D) window.flight3D.setTime(currentTime,state);
   const eventIndex=DATA.events.reduce((best,e,i)=>e.t<=currentTime?i:best,-1);
@@ -1112,7 +1245,15 @@ scrubber.addEventListener("input",()=>{ playing=false; playButton.textContent="�
 for(const id of ["flight-chart","imu-chart","attitude-chart","battery-chart","radio-chart"]){
   document.getElementById(id).on("plotly_hover",event=>{ if(event.points?.length)setTime(event.points[0].x); });
 }
-setTime(minTime);
+if(gpsPositionRows.length){
+  document.getElementById("position-chart").on("plotly_hover",event=>{
+    const t=event.points?.[0]?.customdata;
+    if(finite(t))setTime(t);
+  });
+}
+const requestedTimeText=new URLSearchParams(window.location.search).get("t");
+const requestedTime=requestedTimeText===null?minTime:Number(requestedTimeText);
+setTime(finite(requestedTime)?requestedTime:minTime);
 </script>
 <script type="module">
 import * as THREE from "three";
@@ -1122,6 +1263,7 @@ const D = window.FLIGHT_DATA;
 const host = document.getElementById("flight-3d");
 const quality = document.getElementById("scene-quality");
 const positionLabel = document.getElementById("scene-position");
+const sourceLabel = document.getElementById("scene-source");
 const stateLabel = document.getElementById("scene-state");
 const attitudeLabel = document.getElementById("scene-attitude");
 const recoveryLabel = document.getElementById("scene-recovery");
@@ -1194,15 +1336,41 @@ if (!trajectory.length) {
     lineGeometry.setAttribute("color",new THREE.Float32BufferAttribute(vertexColors,3));
     const flightLine = new THREE.Line(
       lineGeometry,
-      new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:.96})
+      new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:.22})
     );
     scene.add(flightLine);
+
+    const flownGeometry=lineGeometry.clone();
+    flownGeometry.setDrawRange(0,1);
+    const flownLine = new THREE.Line(
+      flownGeometry,
+      new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:1})
+    );
+    scene.add(flownLine);
 
     const shadowLine = new THREE.Line(
       new THREE.BufferGeometry().setFromPoints(points.map(p=>new THREE.Vector3(p.x,.08,p.z))),
       new THREE.LineBasicMaterial({color:0x55d8ff,transparent:true,opacity:.36})
     );
     scene.add(shadowLine);
+
+    const gpsFixPositions=[];
+    for(const fix of D.gps||[]){
+      if(!Number.isFinite(fix.e)||!Number.isFinite(fix.n))continue;
+      const sample=trajectory.reduce(
+        (best,row)=>Math.abs(row.t-fix.t)<Math.abs(best.t-fix.t)?row:best,
+        trajectory[0]
+      );
+      gpsFixPositions.push(fix.e,sample.u,-fix.n);
+    }
+    if(gpsFixPositions.length){
+      const fixGeometry=new THREE.BufferGeometry();
+      fixGeometry.setAttribute("position",new THREE.Float32BufferAttribute(gpsFixPositions,3));
+      scene.add(new THREE.Points(
+        fixGeometry,
+        new THREE.PointsMaterial({color:0xdff8ff,size:1.6,sizeAttenuation:true,transparent:true,opacity:.78})
+      ));
+    }
 
     const padGroup = new THREE.Group();
     const padDisc = new THREE.Mesh(
@@ -1255,6 +1423,38 @@ if (!trajectory.length) {
     rocket.scale.setScalar(1.45);
     scene.add(rocket);
 
+    const groundFootprint=new THREE.Group();
+    const footprintRing=new THREE.Mesh(
+      new THREE.TorusGeometry(2.4,.16,10,48),
+      new THREE.MeshBasicMaterial({color:0x55d8ff,transparent:true,opacity:.92})
+    );
+    footprintRing.rotation.x=Math.PI/2;
+    groundFootprint.add(footprintRing);
+    const footprintDot=new THREE.Mesh(
+      new THREE.CircleGeometry(.55,28),
+      new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.9,side:THREE.DoubleSide})
+    );
+    footprintDot.rotation.x=-Math.PI/2;
+    footprintDot.position.y=.03;
+    groundFootprint.add(footprintDot);
+    groundFootprint.position.y=.12;
+    scene.add(groundFootprint);
+
+    const altitudeTetherGeometry=new THREE.BufferGeometry();
+    altitudeTetherGeometry.setAttribute(
+      "position",new THREE.Float32BufferAttribute([0,0,0,0,0,0],3)
+    );
+    const altitudeTether=new THREE.Line(
+      altitudeTetherGeometry,
+      new THREE.LineDashedMaterial({color:0x55d8ff,dashSize:2,gapSize:1,transparent:true,opacity:.58})
+    );
+    scene.add(altitudeTether);
+
+    const noseArrow=new THREE.ArrowHelper(
+      new THREE.Vector3(0,1,0),new THREE.Vector3(),9,0xff875c,2.2,1.2
+    );
+    scene.add(noseArrow);
+
     function buildParachute() {
       const group = new THREE.Group();
       const canopy = new THREE.Mesh(
@@ -1304,6 +1504,8 @@ if (!trajectory.length) {
       const f=b.t===a.t?0:Math.max(0,Math.min(1,(t-a.t)/(b.t-a.t)));
       return {
         t,e:a.e+(b.e-a.e)*f,n:a.n+(b.n-a.n)*f,u:a.u+(b.u-a.u)*f,
+        lat:a.lat+(b.lat-a.lat)*f,lon:a.lon+(b.lon-a.lon)*f,
+        gpsAgeS:a.gpsAgeS+(b.gpsAgeS-a.gpsAgeS)*f,
         state:f<.5?a.state:b.state,index:lo
       };
     }
@@ -1348,7 +1550,9 @@ if (!trajectory.length) {
       const q=new THREE.Quaternion().slerpQuaternions(
         quaternionFromSample(a),quaternionFromSample(b),fraction
       );
-      const relative=q.multiply(padAttitudeInverse);
+      // Estimator quaternions map airframe vectors into world coordinates.
+      // Express the current pose in the launch-pad frame: inverse(pad) * current.
+      const relative=padAttitudeInverse.clone().multiply(q);
       const display=estimatorToScene.clone().multiply(relative).multiply(sceneToEstimator);
       const raw=fraction<.5?a:b;
       return {quaternion:display,raw};
@@ -1375,8 +1579,38 @@ if (!trajectory.length) {
       return "gyro integration";
     }
     const upAxis = new THREE.Vector3(0,1,0);
-    let orientationMode=attitude.length?"logged":"path";
-    let follow = false;
+    function noseTiltDeg(quaternion){
+      if(!quaternion)return null;
+      const nose=upAxis.clone().applyQuaternion(quaternion).normalize();
+      return Math.acos(Math.max(-1,Math.min(1,nose.dot(upAxis))))*180/Math.PI;
+    }
+    function reconstructedAttitude(logged,direction,pathQuaternion,state){
+      if(state===7&&D.visualization?.drogueNoseDown){
+        const noseDown=direction.clone();
+        noseDown.y=Math.min(noseDown.y,-.35);
+        noseDown.normalize();
+        return {
+          quaternion:new THREE.Quaternion().setFromUnitVectors(upAxis,noseDown),
+          label:"eyewitness nose-down drogue pose"
+        };
+      }
+      if(!logged)return {quaternion:pathQuaternion,label:"path direction fallback"};
+      const loggedNose=upAxis.clone().applyQuaternion(logged.quaternion).normalize();
+      const tilt=Math.acos(Math.max(-1,Math.min(1,loggedNose.dot(upAxis))));
+      const horizontal=new THREE.Vector3(direction.x,0,direction.z);
+      if(horizontal.lengthSq()<1e-5)horizontal.set(loggedNose.x,0,loggedNose.z);
+      if(horizontal.lengthSq()<1e-5)horizontal.set(1,0,0);
+      horizontal.normalize();
+      const target=horizontal.multiplyScalar(Math.sin(tilt));
+      target.y=Math.cos(tilt);
+      target.normalize();
+      return {
+        quaternion:new THREE.Quaternion().setFromUnitVectors(upAxis,target),
+        label:"IMU tilt + GPS path azimuth"
+      };
+    }
+    let orientationMode=attitude.length?"reconstructed":"path";
+    let follow = new URLSearchParams(window.location.search).get("view")==="follow";
     let lastRocketPosition = new THREE.Vector3();
     let lastSceneTime=trajectory[0].t,lastSceneState=trajectory[0].state??0;
     function updateRocket(t,state) {
@@ -1392,21 +1626,45 @@ if (!trajectory.length) {
       direction.normalize();
       const pathQuaternion=new THREE.Quaternion().setFromUnitVectors(upAxis,direction);
       const logged=interpolatedAttitude(t);
-      rocket.quaternion.copy(orientationMode==="logged"&&logged?logged.quaternion:pathQuaternion);
+      const reconstructed=reconstructedAttitude(logged,direction,pathQuaternion,state);
+      const displayed=orientationMode==="logged"&&logged
+        ? logged.quaternion
+        : orientationMode==="path"
+          ? pathQuaternion
+          : reconstructed.quaternion;
+      rocket.quaternion.copy(displayed);
+      flownGeometry.setDrawRange(0,Math.max(1,Math.min(points.length,p.index+1)));
+      groundFootprint.position.set(position.x,.12,position.z);
+      const tetherPositions=altitudeTetherGeometry.attributes.position.array;
+      tetherPositions[0]=position.x; tetherPositions[1]=.18; tetherPositions[2]=position.z;
+      tetherPositions[3]=position.x; tetherPositions[4]=position.y; tetherPositions[5]=position.z;
+      altitudeTetherGeometry.attributes.position.needsUpdate=true;
+      altitudeTether.computeLineDistances();
+      const noseDirection=new THREE.Vector3(0,1,0).applyQuaternion(rocket.quaternion).normalize();
+      noseArrow.position.copy(position);
+      noseArrow.setDirection(noseDirection);
       const flame=rocket.getObjectByName("flame");
-      if(flame) flame.visible=state===2 && (p.u>1 || t>0);
+      if(flame) flame.visible=state===2&&Number.isFinite(D.metrics.boostEndS)&&t>=0&&t<=D.metrics.boostEndS;
       parachute.position.copy(position);
       parachute.visible=state===7;
-      positionLabel.innerHTML=`<strong>Position</strong> E ${p.e.toFixed(1)} m · N ${p.n.toFixed(1)} m · ${p.u.toFixed(1)} m AGL`;
-      const stateText=D.states[String(state)] || `STATE ${state}`;
+      positionLabel.innerHTML=`<strong>Measured position</strong> E ${p.e.toFixed(1)} m · N ${p.n.toFixed(1)} m · ${p.u.toFixed(1)} m AGL`;
+      sourceLabel.innerHTML=`<strong>Sources</strong> GPS horizontal (${p.gpsAgeS.toFixed(2)} s to nearest fix) · barometer vertical`;
+      const stateText=state===2&&Number.isFinite(D.metrics.boostEndS)&&t>D.metrics.boostEndS
+        ? "ASCENT · COASTING"
+        : D.states[String(state)] || `STATE ${state}`;
       stateLabel.innerHTML=`<strong>Phase</strong> ${stateText}`;
+      const tilt=noseTiltDeg(logged?.quaternion);
       if(orientationMode==="logged"&&logged){
-        attitudeLabel.innerHTML=`<strong>Attitude</strong> logged · R ${logged.raw.roll.toFixed(1)}° · P ${logged.raw.pitch.toFixed(1)}° · Y ${logged.raw.yaw.toFixed(1)}° · ${confidenceAt(t)}`;
+        const heading=D.metrics.headingReferenced?"heading referenced":"HEADING UNAVAILABLE · magnetometer rejected";
+        attitudeLabel.innerHTML=`<strong>IMU diagnostic</strong> nose tilt ${tilt.toFixed(1)}° · ${heading} · ${confidenceAt(t)}`;
+      }else if(orientationMode==="reconstructed"){
+        attitudeLabel.innerHTML=`<strong>Reconstructed pose</strong> ${reconstructed.label}${Number.isFinite(tilt)?` · measured tilt ${tilt.toFixed(1)}°`:""}`;
       }else{
-        attitudeLabel.innerHTML="<strong>Attitude</strong> path direction · not body orientation";
+        attitudeLabel.innerHTML="<strong>Path direction</strong> synthetic velocity alignment · not measured body orientation";
       }
       recoveryLabel.hidden=state!==7&&state!==8;
       if(state===8)recoveryLabel.innerHTML="<strong>Recovery</strong> apogee decision logged only · no physical output";
+      else if(state===7&&D.visualization?.drogueNoseDown)recoveryLabel.innerHTML="<strong>Recovery</strong> eyewitness nose-down pose · exact swing and canopy are illustrative";
       else if(state===7)recoveryLabel.innerHTML="<strong>Recovery</strong> UNDER DROGUE detected · canopy pose is illustrative";
     }
 
@@ -1476,26 +1734,36 @@ if (!trajectory.length) {
       quality.textContent="Map tiles unavailable · schematic ground shown · model enlarged for visibility";
     });
 
+    const reconstructedButton=document.getElementById("attitude-reconstructed");
     const loggedButton=document.getElementById("attitude-logged");
     const pathButton=document.getElementById("attitude-path");
+    if(follow){
+      document.getElementById("view-follow").classList.add("active");
+      document.getElementById("view-orbit").classList.remove("active");
+    }
+    function selectOrientation(mode){
+      orientationMode=mode;
+      reconstructedButton.classList.toggle("active",mode==="reconstructed");
+      loggedButton.classList.toggle("active",mode==="logged");
+      pathButton.classList.toggle("active",mode==="path");
+      updateRocket(lastSceneTime,lastSceneState);
+    }
     if(!attitude.length){
+      reconstructedButton.disabled=true;
+      reconstructedButton.classList.remove("active");
       loggedButton.disabled=true;
       loggedButton.classList.remove("active");
       pathButton.classList.add("active");
       orientationMode="path";
     }
+    reconstructedButton.addEventListener("click",()=>{
+      if(attitude.length)selectOrientation("reconstructed");
+    });
     loggedButton.addEventListener("click",()=>{
-      if(!attitude.length)return;
-      orientationMode="logged";
-      loggedButton.classList.add("active");
-      pathButton.classList.remove("active");
-      updateRocket(lastSceneTime,lastSceneState);
+      if(attitude.length)selectOrientation("logged");
     });
     pathButton.addEventListener("click",()=>{
-      orientationMode="path";
-      pathButton.classList.add("active");
-      loggedButton.classList.remove("active");
-      updateRocket(lastSceneTime,lastSceneState);
+      selectOrientation("path");
     });
     document.getElementById("view-orbit").addEventListener("click",()=>{
       follow=false;
@@ -1518,6 +1786,9 @@ if (!trajectory.length) {
         camera.aspect=width/height;
         camera.updateProjectionMatrix();
       }
+      const pulse=1+.12*Math.sin(performance.now()*.004);
+      footprintRing.scale.setScalar(pulse);
+      footprintRing.material.opacity=.7+.22*Math.sin(performance.now()*.004);
       if(follow){
         const focus=parachute.visible
           ? lastRocketPosition.clone().add(new THREE.Vector3(0,6,0))
@@ -1538,8 +1809,9 @@ if (!trajectory.length) {
       setTime:updateRocket,
       fit:fitTrack
     };
-    const initialState=trajectory[0].state ?? 0;
-    updateRocket(trajectory[0].t,initialState);
+    const initialTime=Number.isFinite(window.flightCurrentTime)?window.flightCurrentTime:trajectory[0].t;
+    const initialPoint=interpolateTrack(initialTime);
+    updateRocket(initialTime,initialPoint.state??0);
     render();
   } catch(error) {
     quality.textContent=`3D unavailable: ${error.message}`;
@@ -1565,6 +1837,11 @@ def main() -> int:
     parser.add_argument("main_csv", type=Path, help="Main rocket_nand_<index>_op<id>.csv export")
     parser.add_argument("-o", "--output", type=Path, help="Output HTML path")
     parser.add_argument("--open", action="store_true", help="Open the generated report in the default browser")
+    parser.add_argument(
+        "--drogue-nose-down",
+        action="store_true",
+        help="Use an eyewitness-informed nose-down pose while UNDER DROGUE",
+    )
     args = parser.parse_args()
 
     main_path = args.main_csv.expanduser().resolve()
@@ -1576,7 +1853,7 @@ def main() -> int:
         else main_path.with_name(f"{main_path.stem}_analysis.html")
     )
 
-    payload = build_payload(main_path)
+    payload = build_payload(main_path, drogue_nose_down=args.drogue_nose_down)
     output_path.write_text(render_html(payload), encoding="utf-8")
     print(f"Generated {output_path}")
     print(

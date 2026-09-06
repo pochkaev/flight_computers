@@ -5,6 +5,7 @@ Firmware:
 - [RocketV10.ino](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/RocketV10.ino)
 - [config.h](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/fw/RocketV10/config.h)
 - [FLIGHT_LOGGING.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/FLIGHT_LOGGING.md)
+- [Flight log archive](../../../FLIGHT_LOG_ARCHIVE.md)
 - [IMU_QUATERNION.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/IMU_QUATERNION.md)
 - [calibration snapshots](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/calibration/README.md)
 - [PYRO.md](/Users/k_pochkaev/github/flight_computers/teensy_v0/rocket/rocket_v10/docs/PYRO.md)

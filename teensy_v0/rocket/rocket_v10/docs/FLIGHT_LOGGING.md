@@ -340,6 +340,11 @@ Ground logs are valuable corroboration, but they only contain packets that
 reached the ground station. The rocket NAND log is authoritative for onboard
 sensor evidence and state transitions.
 
+Archive the raw Rocket NAND file, full Rocket CSV export, analyzer report, and
+the original Ground SD logs using the shared
+[flight log archive procedure](../../../FLIGHT_LOG_ARCHIVE.md). Device storage
+must not be erased until the separate archive copy has been verified.
+
 ## Field checks
 
 Before flight:
